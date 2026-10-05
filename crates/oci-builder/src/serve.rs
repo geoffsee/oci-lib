@@ -10,11 +10,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use rob_proto::{
+use oci_builder::proto::{
     Build, GuestFrame, HostFrame, Init, Push, VSOCK_PORT, read_host_frame, write_guest_frame,
 };
 
-use buildah_ffi::{
+use oci_builder::{
     BuildRequest, Builder, CancelToken, Config, Error, ErrorCode, ImageFormat, Isolation, LogLevel,
     LogRecord, PullPolicy, PushRequest, StorageDriver,
 };

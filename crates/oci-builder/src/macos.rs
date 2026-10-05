@@ -33,7 +33,8 @@ use objc2_virtualization::{
     VZVirtioSocketDevice, VZVirtioSocketDeviceConfiguration, VZVirtualMachine,
     VZVirtualMachineConfiguration,
 };
-use rob_proto::{GuestFrame, HostFrame, Init, VSOCK_PORT, read_guest_frame, write_host_frame};
+use crate::proto as rob_proto;
+use crate::proto::{GuestFrame, HostFrame, Init, VSOCK_PORT, read_guest_frame, write_host_frame};
 
 use crate::builder::{BuildRequest, CancelToken, ImageInfo, LogRecord, LogStream, PreparedPaths};
 use crate::config::{Config, ImageFormat, StorageDriver};
@@ -951,7 +952,7 @@ fn locate_artifacts() -> Result<(PathBuf, PathBuf), Error> {
         return materialize_embedded();
     }
     let mut tried = Vec::new();
-    let mut candidates = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../guest/out")];
+    let mut candidates = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("guest/out")];
     if let Ok(cwd) = env::current_dir() {
         let mut dir = cwd;
         for _ in 0..6 {

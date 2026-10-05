@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/buildah-ffi", "crates/oci-builder", "crates/rob-proto"]
+members = ["crates/oci-builder"]
 
 [workspace.package]
 version = "0.1.4"

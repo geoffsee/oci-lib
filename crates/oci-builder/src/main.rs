@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use buildah_ffi::{
+use oci_builder::{
     BuildRequest, Builder, Config, Error, ErrorCode, ImageFormat, ImageInfo, Isolation, LogLevel,
     LogRecord, PullPolicy, PushRequest, StorageDriver, startup,
 };

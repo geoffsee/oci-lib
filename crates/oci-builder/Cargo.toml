@@ -1,19 +1,70 @@
 [package]
 name = "oci-builder"
-version.workspace = true
-description = "CLI for building and pushing OCI images with embedded Buildah"
-readme = "../../README.md"
-documentation = "https://docs.rs/oci-builder"
-license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-edition.workspace = true
-rust-version.workspace = true
+version = "0.1.4"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+description = "Embed Buildah in Rust and CLI for building and pushing OCI images"
+repository = "https://github.com/geoffsee/oci-builder"
+homepage = "https://github.com/geoffsee/oci-builder"
+
+[lib]
+name = "oci_builder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oci-builder"
+path = "src/main.rs"
 
 [dependencies]
-buildah-ffi.workspace = true
 clap = { version = "4", features = ["derive"] }
 
-[target.'cfg(target_os = "linux")'.dependencies]
-rob-proto.workspace = true
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2-foundation = { version = "0.3", features = [
+    "NSArray",
+    "NSError",
+    "NSFileHandle",
+    "NSString",
+    "NSURL",
+] }
+objc2-virtualization = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "dispatch2",
+    "VZBootLoader",
+    "VZLinuxBootLoader",
+    "VZVirtualMachine",
+    "VZVirtualMachineConfiguration",
+    "VZGenericPlatformConfiguration",
+    "VZGenericMachineIdentifier",
+    "VZPlatformConfiguration",
+    "VZVirtioFileSystemDeviceConfiguration",
+    "VZDirectoryShare",
+    "VZDirectorySharingDeviceConfiguration",
+    "VZSharedDirectory",
+    "VZSingleDirectoryShare",
+    "VZVirtioSocketDevice",
+    "VZVirtioSocketDeviceConfiguration",
+    "VZVirtioSocketConnection",
+    "VZSocketDevice",
+    "VZSocketDeviceConfiguration",
+    "VZNATNetworkDeviceAttachment",
+    "VZNetworkDeviceAttachment",
+    "VZNetworkDeviceConfiguration",
+    "VZVirtioNetworkDeviceConfiguration",
+    "VZVirtioEntropyDeviceConfiguration",
+    "VZEntropyDeviceConfiguration",
+    "VZSerialPortConfiguration",
+    "VZSerialPortAttachment",
+    "VZFileHandleSerialPortAttachment",
+    "VZVirtioConsoleDeviceSerialPortConfiguration",
+] }
+
+[build-dependencies]
+cc = "1"

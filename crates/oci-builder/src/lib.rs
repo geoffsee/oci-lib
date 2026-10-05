@@ -14,9 +14,9 @@
 //! link a stub and [`startup`] returns [`ErrorCode::Unsupported`].
 //!
 //! ```no_run
-//! use buildah_ffi::{startup, BuildRequest, Builder, Config, StorageDriver};
+//! use oci_builder::{startup, BuildRequest, Builder, Config, StorageDriver};
 //!
-//! fn main() -> Result<(), buildah_ffi::Error> {
+//! fn main() -> Result<(), oci_builder::Error> {
 //!     startup()?;
 //!     let builder = Builder::open(Config {
 //!         storage_driver: Some(StorageDriver::Vfs),
@@ -32,6 +32,9 @@
 //!     Ok(())
 //! }
 //! ```
+
+pub mod proto;
+pub use proto as rob_proto;
 
 mod builder;
 mod config;

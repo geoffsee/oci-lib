@@ -68,20 +68,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "buildah-ffi"
-version = "0.1.4"
-dependencies = [
- "block2",
- "cc",
- "dispatch2",
- "libc",
- "objc2",
- "objc2-foundation",
- "objc2-virtualization",
- "rob-proto",
-]
-
-[[package]]
 name = "cc"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -228,10 +214,14 @@ dependencies = [
 name = "oci-builder"
 version = "0.1.4"
 dependencies = [
- "buildah-ffi",
+ "block2",
+ "cc",
  "clap",
+ "dispatch2",
  "libc",
- "rob-proto",
+ "objc2",
+ "objc2-foundation",
+ "objc2-virtualization",
 ]
 
 [[package]]
@@ -257,10 +247,6 @@ checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
 ]
-
-[[package]]
-name = "rob-proto"
-version = "0.1.4"
 
 [[package]]
 name = "shlex"
