@@ -68,8 +68,8 @@ fn embed_guest(manifest: &Path, out_dir: &Path) -> Result<(), String> {
     println!("cargo:rerun-if-env-changed=ROR_GUEST_KERNEL");
     println!("cargo:rerun-if-env-changed=ROR_GUEST_INITRD");
     println!("cargo:rerun-if-env-changed=ROR_REQUIRE_EMBEDDED_GUEST");
-    println!("cargo:rerun-if-changed=../../guest/out/vmlinuz");
-    println!("cargo:rerun-if-changed=../../guest/out/initramfs");
+    println!("cargo:rerun-if-changed=guest/out/vmlinuz");
+    println!("cargo:rerun-if-changed=guest/out/initramfs");
 
     let kernel_dest = out_dir.join("ror-guest-vmlinuz");
     let initrd_dest = out_dir.join("ror-guest-initramfs");
@@ -110,7 +110,7 @@ fn guest_sources(manifest: &Path) -> Result<Option<(PathBuf, PathBuf)>, String> 
             return Err("set both ROR_GUEST_KERNEL and ROR_GUEST_INITRD".into());
         }
         (Err(_), Err(_)) => {
-            let dir = manifest.join("../../guest/out");
+            let dir = manifest.join("guest/out");
             ((dir.join("vmlinuz"), dir.join("initramfs")), false)
         }
     };

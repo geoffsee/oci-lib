@@ -7,8 +7,10 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
-use libcontainer_ffi::{Error, ErrorCode, RunRequest, Runtime};
-use ror_proto::{GuestFrame, HostFrame, Run, VSOCK_PORT, read_host_frame, write_guest_frame};
+use oci_runner::proto::{
+    GuestFrame, HostFrame, Run, VSOCK_PORT, read_host_frame, write_guest_frame,
+};
+use oci_runner::{Error, ErrorCode, RunRequest, Runtime};
 
 pub fn engine_serve() -> Result<i32, Error> {
     let listener = vsock_listen(VSOCK_PORT)

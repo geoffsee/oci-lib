@@ -160,20 +160,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
-name = "libcontainer-ffi"
-version = "0.1.0"
-dependencies = [
- "block2",
- "cc",
- "dispatch2",
- "libc",
- "objc2",
- "objc2-foundation",
- "objc2-virtualization",
- "ror-proto",
-]
-
-[[package]]
 name = "objc2"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -228,10 +214,14 @@ dependencies = [
 name = "oci-runner"
 version = "0.1.0"
 dependencies = [
+ "block2",
+ "cc",
  "clap",
+ "dispatch2",
  "libc",
- "libcontainer-ffi",
- "ror-proto",
+ "objc2",
+ "objc2-foundation",
+ "objc2-virtualization",
 ]
 
 [[package]]
@@ -257,10 +247,6 @@ checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
 ]
-
-[[package]]
-name = "ror-proto"
-version = "0.1.0"
 
 [[package]]
 name = "shlex"

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use libcontainer_ffi::{Error, ErrorCode, RunRequest, Runtime, startup};
+use oci_runner::{Error, ErrorCode, RunRequest, Runtime, startup};
 
 #[cfg(target_os = "linux")]
 mod serve;

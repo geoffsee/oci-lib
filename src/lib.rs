@@ -13,9 +13,9 @@
 //! from the Go runtime before `main` continues.
 //!
 //! ```no_run
-//! use libcontainer_ffi::{startup, RunRequest, Runtime};
+//! use oci_runner::{startup, RunRequest, Runtime};
 //!
-//! fn main() -> Result<(), libcontainer_ffi::Error> {
+//! fn main() -> Result<(), oci_runner::Error> {
 //!     startup()?;
 //!     let runtime = Runtime::open()?;
 //!     let status = runtime.run(&RunRequest::new("/path/to/rootfs", ["/bin/echo", "hi"]))?;
@@ -26,6 +26,9 @@
 //! ```
 //!
 //! [`Runtime::shutdown`] stops the macOS guest. Dropping the [`Runtime`] does not.
+
+pub mod proto;
+pub use proto as ror_proto;
 
 mod error;
 mod ffi;

@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn rejects_a_list_count_larger_than_the_frame() {
         let count = 0x0100_0000u32.to_le_bytes();
-        let mut cursor = crate::Cursor::new(&count);
+        let mut cursor = super::Cursor::new(&count);
         let err = cursor.strs().unwrap_err();
         assert!(err.to_string().contains("longer than the frame"));
     }

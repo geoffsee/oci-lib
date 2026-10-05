@@ -12,3 +12,6 @@ crates/libcontainer-ffi/shim/*.h
 # Linux guest image produced by guest/build.sh. Not part of the source tree.
 guest/out/
 guest/cache/
+
+# Local integration documentation
+docs/rubix-kube-integration.md

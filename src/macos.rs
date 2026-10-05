@@ -17,6 +17,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use std::{env, sync::Mutex as StdMutex};
 
+use crate::proto::{
+    GuestFrame, HostFrame, Run, STDERR, VSOCK_PORT, read_guest_frame, write_host_frame,
+};
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use libc::c_int;
@@ -32,7 +35,6 @@ use objc2_virtualization::{
     VZVirtioSocketDevice, VZVirtioSocketDeviceConfiguration, VZVirtualMachine,
     VZVirtualMachineConfiguration,
 };
-use ror_proto::{GuestFrame, HostFrame, Run, VSOCK_PORT, read_guest_frame, write_host_frame};
 
 use crate::OutputFn;
 use crate::error::{Error, ErrorCode};
@@ -170,7 +172,7 @@ pub(crate) fn diagnose() -> Result<String, Error> {
 }
 
 fn write_stdio(stream: u8, data: &[u8]) {
-    if stream == ror_proto::STDERR {
+    if stream == STDERR {
         let mut err = io::stderr().lock();
         let _ = err.write_all(data);
         let _ = err.flush();
@@ -695,7 +697,7 @@ fn locate_artifacts() -> Result<(PathBuf, PathBuf), Error> {
         return materialize_embedded();
     }
     let mut tried = Vec::new();
-    let mut candidates = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../guest/out")];
+    let mut candidates = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("guest/out")];
     if let Ok(cwd) = env::current_dir() {
         let mut dir = cwd;
         for _ in 0..6 {
