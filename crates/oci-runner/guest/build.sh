@@ -122,7 +122,8 @@ fi
 
 echo "building oci-runner" >&2
 cargo build --release --locked -p oci-runner
-bin="$root/target/release/oci-runner"
+target_dir=$(cargo metadata --format-version 1 --no-deps 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null || echo "$root/target")
+bin="$target_dir/release/oci-runner"
 
 stage=$(mktemp -d)
 cleanup() {

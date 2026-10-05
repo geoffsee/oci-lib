@@ -122,7 +122,8 @@ fi
 
 echo "building oci-builder without seccomp or apparmor" >&2
 ROB_DISABLE_OPTIONAL_LIBS=1 cargo build --release --locked -p oci-builder
-bin="$root/target/release/oci-builder"
+target_dir=$(cargo metadata --format-version 1 --no-deps 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])' 2>/dev/null || echo "$root/target")
+bin="$target_dir/release/oci-builder"
 
 stage=$(mktemp -d)
 cleanup() {

@@ -104,6 +104,23 @@ jobs:
           ')
           test -n "$BIN"
           sudo env PATH="$PATH" ROB_TEST_REGISTRY=localhost:5000 ROB_REQUIRE_BUILD=1 "$BIN" --nocapture --test-threads=1
+      - name: Build and run oci-runner integration test as root
+        run: |
+          set -euo pipefail
+          cargo build --locked -p oci-runner
+          cargo test -p oci-runner --test run_container --locked --no-run --message-format=json > /tmp/run-container.json
+          BIN=$(python3 -c '
+          import json
+          path = ""
+          for line in open("/tmp/run-container.json"):
+              event = json.loads(line)
+              target = event.get("target") or {}
+              if event.get("reason") == "compiler-artifact" and target.get("name") == "run_container" and event.get("executable"):
+                  path = event["executable"]
+          print(path)
+          ')
+          test -n "$BIN"
+          sudo env PATH="$PATH" CARGO_BIN_EXE_oci_runner="$(pwd)/target/debug/oci-runner" CARGO_BIN_EXE_oci-runner="$(pwd)/target/debug/oci-runner" ROR_TEST_HOST_ROOT=1 "$BIN" --nocapture
 
   linux-rootless:
     name: rootless build and push

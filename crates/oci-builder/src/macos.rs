@@ -18,6 +18,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use std::{env, sync::Mutex as StdMutex};
 
+use crate::proto as rob_proto;
+use crate::proto::{GuestFrame, HostFrame, Init, VSOCK_PORT, read_guest_frame, write_host_frame};
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
 use libc::c_int;
@@ -33,8 +35,6 @@ use objc2_virtualization::{
     VZVirtioSocketDevice, VZVirtioSocketDeviceConfiguration, VZVirtualMachine,
     VZVirtualMachineConfiguration,
 };
-use crate::proto as rob_proto;
-use crate::proto::{GuestFrame, HostFrame, Init, VSOCK_PORT, read_guest_frame, write_host_frame};
 
 use crate::builder::{BuildRequest, CancelToken, ImageInfo, LogRecord, LogStream, PreparedPaths};
 use crate::config::{Config, ImageFormat, StorageDriver};

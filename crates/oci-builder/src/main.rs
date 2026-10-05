@@ -4,11 +4,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use clap::{Parser, Subcommand, ValueEnum};
 use oci_builder::{
     BuildRequest, Builder, Config, Error, ErrorCode, ImageFormat, ImageInfo, Isolation, LogLevel,
     LogRecord, PullPolicy, PushRequest, StorageDriver, startup,
 };
-use clap::{Parser, Subcommand, ValueEnum};
 
 #[cfg(target_os = "linux")]
 mod serve;

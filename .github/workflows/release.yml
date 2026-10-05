@@ -56,7 +56,7 @@ jobs:
           meta = json.loads(subprocess.check_output([
               "cargo", "metadata", "--format-version", "1", "--no-deps", "--locked",
           ]))
-          want = {"rob-proto", "buildah-ffi", "oci-builder"}
+          want = {"oci-builder", "oci-runner"}
           found = {pkg["name"]: pkg["version"] for pkg in meta["packages"] if pkg["name"] in want}
           missing = want - set(found)
           if missing:
@@ -64,48 +64,16 @@ jobs:
           for name, version in sorted(found.items()):
               if version != tag:
                   raise SystemExit(f"{name} is {version}, tag is v{tag}")
-          print(f"tag v{tag} matches rob-proto, buildah-ffi, and oci-builder")
+          print(f"tag v{tag} matches oci-builder and oci-runner")
           PY
       - uses: rust-lang/crates-io-auth-action@v1
         id: auth
-      - name: Publish rob-proto
-        run: bash .github/workflows/publish-crate.sh rob-proto
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-      - name: Wait until rob-proto is on the index
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          url="https://index.crates.io/ro/b-/rob-proto"
-          for _ in $(seq 1 60); do
-            if curl --proto '=https' --tlsv1.2 -fsSL -A "oci-builder-release" "$url" | grep -q "\"vers\":\"${version}\""; then
-              echo "rob-proto ${version} is on the index"
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "rob-proto ${version} did not appear on the sparse index" >&2
-          exit 1
-      - name: Publish buildah-ffi
-        run: bash .github/workflows/publish-crate.sh buildah-ffi
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-      - name: Wait until buildah-ffi is on the index
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          url="https://index.crates.io/bu/il/buildah-ffi"
-          for _ in $(seq 1 60); do
-            if curl --proto '=https' --tlsv1.2 -fsSL -A "oci-builder-release" "$url" | grep -q "\"vers\":\"${version}\""; then
-              echo "buildah-ffi ${version} is on the index"
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "buildah-ffi ${version} did not appear on the sparse index" >&2
-          exit 1
       - name: Publish oci-builder
         run: bash .github/workflows/publish-crate.sh oci-builder
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      - name: Publish oci-runner
+        run: bash .github/workflows/publish-crate.sh oci-runner
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
@@ -157,33 +125,44 @@ jobs:
               sudo ln -sfn "/usr/include/${arch}-linux-gnu/asm" "$dest/asm"
             fi
           fi
-      - name: Build the release binary
-        run: cargo build --release --locked -p oci-builder
+      - name: Build the release binaries
+        run: |
+          cargo build --release --locked -p oci-builder
+          cargo build --release --locked -p oci-runner
       - name: Allow unprivileged user namespaces
         run: |
           set -euo pipefail
           echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/99-userns.conf >/dev/null
           echo 'kernel.unprivileged_userns_clone=1' | sudo tee -a /etc/sysctl.d/99-userns.conf >/dev/null
           sudo sysctl --system
-      - name: Stage the binary
+      - name: Stage the binaries
         run: |
           set -euo pipefail
           mkdir -p dist
           cp target/release/oci-builder dist/oci-builder
-          chmod 755 dist/oci-builder
+          cp target/release/oci-runner dist/oci-runner
+          chmod 755 dist/oci-builder dist/oci-runner
           ./dist/oci-builder --help >/dev/null
+          ./dist/oci-runner --help >/dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: dist/oci-builder
-      - name: Build the Apple Silicon guest
+          path: dist/
+      - name: Build the Apple Silicon guests
         if: matrix.guest
-        run: ./guest/build.sh
+        run: |
+          ./crates/oci-builder/guest/build.sh
+          ./crates/oci-runner/guest/build.sh
       - uses: actions/upload-artifact@v4
         if: matrix.guest
         with:
-          name: guest-aarch64
-          path: guest/out/
+          name: guest-aarch64-builder
+          path: crates/oci-builder/guest/out/
+      - uses: actions/upload-artifact@v4
+        if: matrix.guest
+        with:
+          name: guest-aarch64-runner
+          path: crates/oci-runner/guest/out/
 
   macos-binary:
     name: aarch64-apple-darwin
@@ -202,27 +181,36 @@ jobs:
             macos-aarch64-release-
       - uses: actions/download-artifact@v4
         with:
-          name: guest-aarch64
-          path: guest/out
-      - name: Embed the guest and build
+          name: guest-aarch64-builder
+          path: crates/oci-builder/guest/out
+      - uses: actions/download-artifact@v4
+        with:
+          name: guest-aarch64-runner
+          path: crates/oci-runner/guest/out
+      - name: Embed the guests and build
         env:
           ROB_REQUIRE_EMBEDDED_GUEST: "1"
-        run: cargo build --release --locked -p oci-builder
-      - name: Check the signature and that the guest was embedded
+          ROR_REQUIRE_EMBEDDED_GUEST: "1"
+        run: |
+          cargo build --release --locked -p oci-builder
+          cargo build --release --locked -p oci-runner
+      - name: Check signatures and that guests were embedded
         run: |
           set -euo pipefail
-          bin=target/release/oci-builder
-          codesign --verify --verbose=2 "$bin"
-          codesign -d --entitlements - "$bin" | grep -q com.apple.security.virtualization
-          size=$(wc -c < "$bin")
-          test "$size" -gt 10000000
-          "$bin" --help >/dev/null
           mkdir -p dist
-          cp "$bin" dist/oci-builder
+          for bin_name in oci-builder oci-runner; do
+            bin="target/release/$bin_name"
+            codesign --verify --verbose=2 "$bin"
+            codesign -d --entitlements - "$bin" | grep -q com.apple.security.virtualization
+            size=$(wc -c < "$bin")
+            test "$size" -gt 10000000
+            "$bin" --help >/dev/null
+            cp "$bin" "dist/$bin_name"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: aarch64-apple-darwin
-          path: dist/oci-builder
+          path: dist/
 
   github-release:
     name: publish binary archives
@@ -247,11 +235,13 @@ jobs:
           esac
           mkdir -p packages
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin; do
-            stage=$(mktemp -d)
-            cp "artifacts/${target}/oci-builder" "$stage/oci-builder"
-            chmod 755 "$stage/oci-builder"
-            tar -C "$stage" -czf "packages/oci-builder-${version}-${target}.tar.gz" oci-builder
-            rm -rf "$stage"
+            for pkg in oci-builder oci-runner; do
+              stage=$(mktemp -d)
+              cp "artifacts/${target}/${pkg}" "$stage/${pkg}"
+              chmod 755 "$stage/${pkg}"
+              tar -C "$stage" -czf "packages/${pkg}-${version}-${target}.tar.gz" "${pkg}"
+              rm -rf "$stage"
+            done
           done
           (cd packages && sha256sum ./*.tar.gz > SHA256SUMS)
       - name: Publish the GitHub release
@@ -268,7 +258,7 @@ jobs:
             printf '%s\n' \
               "## Binaries" \
               "" \
-              "Each archive contains \`oci-builder\`. The Apple Silicon binary embeds the Linux kernel and initramfs and writes them to \`~/Library/Caches/oci-builder\` on first use. Linux binaries are built on Ubuntu 24.04 and need that glibc plus \`libseccomp.so.2\`." \
+              "Archives contain \`oci-builder\` and \`oci-runner\`. The Apple Silicon binaries embed the Linux kernel and initramfs and write them to the cache directory on first use. Linux binaries are built on Ubuntu 24.04 and need that glibc plus \`libseccomp.so.2\`." \
               ""
             gh api --method POST \
               -H "Accept: application/vnd.github+json" \

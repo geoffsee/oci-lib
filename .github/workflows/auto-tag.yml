@@ -5,7 +5,8 @@ on:
     branches: [main]
     paths:
       - "Cargo.lock"
-      - "crates/buildah-ffi/shim/go.sum"
+      - "crates/oci-builder/shim/go.sum"
+      - "crates/oci-runner/shim/go.sum"
   workflow_dispatch:
     inputs:
       bump:
@@ -103,13 +104,10 @@ jobs:
           git checkout -B "$BRANCH" origin/main
 
           # Bump after branch reset so origin/main doesn't wipe Cargo.toml.
-          # workspace.package.version and the buildah-ffi path dependency must
-          # stay equal: cargo publish turns that path dep into a crates.io
-          # requirement. Cargo.lock records the same versions for the two
-          # path packages (no registry source). Editing those fields avoids
-          # `cargo update`, which can rewrite the lockfile format.
+          # Cargo.lock records the same versions for workspace packages.
+          # Editing those fields avoids `cargo update`, which can rewrite the lockfile format.
           python3 - << 'PY'
-          import os, re, sys
+          import os, sys
           from pathlib import Path
 
           current = os.environ["CURRENT"]
@@ -118,38 +116,23 @@ jobs:
           toml_path = Path("Cargo.toml")
           lines = toml_path.read_text().splitlines(True)
           in_pkg = False
-          in_deps = False
           saw_pkg = False
-          saw_deps = set()
-          dep_prefixes = ("buildah-ffi = ", "rob-proto = ")
           for i, line in enumerate(lines):
               stripped = line.strip()
               if stripped.startswith("[") and stripped.endswith("]"):
                   in_pkg = stripped == "[workspace.package]"
-                  in_deps = stripped == "[workspace.dependencies]"
               if in_pkg and line.startswith("version = "):
                   if line != f'version = "{current}"\n':
                       sys.exit(f"unexpected workspace version line: {line!r}")
                   lines[i] = f'version = "{nxt}"\n'
                   saw_pkg = True
-              if in_deps and line.startswith(dep_prefixes):
-                  new, n = re.subn(
-                      rf'version = "{re.escape(current)}"',
-                      f'version = "{nxt}"',
-                      line,
-                      count=1,
-                  )
-                  if n != 1:
-                      sys.exit(f"version was not updated: {line!r}")
-                  lines[i] = new
-                  saw_deps.add(line.split(" = ", 1)[0])
-          if not saw_pkg or saw_deps != {"buildah-ffi", "rob-proto"}:
+          if not saw_pkg:
               sys.exit("Cargo.toml is missing a version to bump")
           toml_path.write_text("".join(lines))
 
           lock_path = Path("Cargo.lock")
           parts = lock_path.read_text().split("[[package]]\n")
-          names = {"rob-proto", "buildah-ffi", "oci-builder"}
+          names = {"oci-builder", "oci-runner"}
           found = set()
           out = [parts[0]]
           for part in parts[1:]:

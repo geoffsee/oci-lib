@@ -67,11 +67,11 @@ pub type OutputFn = Arc<dyn Fn(u8, &[u8]) + Send + Sync>;
 pub fn startup() -> Result<(), Error> {
     #[cfg(target_os = "linux")]
     {
-        return linux::startup();
+        linux::startup()
     }
     #[cfg(target_os = "macos")]
     {
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
@@ -92,12 +92,12 @@ impl Runtime {
         #[cfg(target_os = "linux")]
         {
             linux::open()?;
-            return Ok(Self { _private: () });
+            Ok(Self { _private: () })
         }
         #[cfg(target_os = "macos")]
         {
             macos::open()?;
-            return Ok(Self { _private: () });
+            Ok(Self { _private: () })
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -125,11 +125,11 @@ impl Runtime {
         let prepared = request.prepare()?;
         #[cfg(target_os = "linux")]
         {
-            return linux::run(&prepared, on_output);
+            linux::run(&prepared, on_output)
         }
         #[cfg(target_os = "macos")]
         {
-            return macos::run(&prepared, on_output);
+            macos::run(&prepared, on_output)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -145,11 +145,11 @@ impl Runtime {
     pub fn shutdown(self) -> Result<(), Error> {
         #[cfg(target_os = "linux")]
         {
-            return linux::shutdown();
+            linux::shutdown()
         }
         #[cfg(target_os = "macos")]
         {
-            return macos::shutdown();
+            macos::shutdown()
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
@@ -164,11 +164,11 @@ impl Runtime {
     pub fn diagnose() -> Result<String, Error> {
         #[cfg(target_os = "linux")]
         {
-            return linux::diagnose();
+            linux::diagnose()
         }
         #[cfg(target_os = "macos")]
         {
-            return macos::diagnose();
+            macos::diagnose()
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {

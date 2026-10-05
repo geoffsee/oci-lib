@@ -71,7 +71,7 @@ pub(crate) fn run(prepared: &PreparedRun, on_output: Option<OutputFn>) -> Result
     let argv_ptrs: Vec<*const c_char> = argv.iter().map(|item| item.as_ptr()).collect();
     let env_ptrs: Vec<*const c_char> = env.iter().map(|item| item.as_ptr()).collect();
     let sink = on_output.map(|callback| Sink { callback });
-    let mut request = ffi::RorRunRequest {
+    let request = ffi::RorRunRequest {
         rootfs: rootfs.as_ptr(),
         cwd: cwd.as_ptr(),
         hostname: hostname.as_ptr(),
@@ -102,7 +102,7 @@ pub(crate) fn run(prepared: &PreparedRun, on_output: Option<OutputFn>) -> Result
     };
     let mut exit_code = 0;
     let mut err = ffi::RorError::zero();
-    let rc = unsafe { ffi::ror_run(&mut request, &mut exit_code, &mut err) };
+    let rc = unsafe { ffi::ror_run(&request, &mut exit_code, &mut err) };
     if rc == 0 {
         return Ok(exit_code);
     }
@@ -114,7 +114,7 @@ unsafe extern "C" fn trampoline(user: *mut c_void, stream: i32, data: *const c_c
         return;
     }
     let sink = unsafe { &*(user as *const Sink) };
-    let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, len) };
+    let bytes = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len) };
     let _ = catch_unwind(AssertUnwindSafe(|| (sink.callback)(stream as u8, bytes)));
 }
 

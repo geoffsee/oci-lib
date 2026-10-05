@@ -1,12 +1,13 @@
 [package]
 name = "oci-builder"
-version = "0.1.4"
-edition = "2024"
-license = "Apache-2.0"
-rust-version = "1.85"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
 description = "Embed Buildah in Rust and CLI for building and pushing OCI images"
-repository = "https://github.com/geoffsee/oci-builder"
-homepage = "https://github.com/geoffsee/oci-builder"
+readme = "README.md"
 
 [lib]
 name = "oci_builder"
