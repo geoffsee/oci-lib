@@ -4,6 +4,9 @@
 
 use std::fmt;
 
+/// Failure returned by the runtime engine or argument validation.
+///
+/// `code` is stable and is the process exit code used by `oci-runner`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     code: ErrorCode,
@@ -11,19 +14,28 @@ pub struct Error {
     detail: String,
 }
 
+/// Stable failure class. Values match the C ABI and CLI exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum ErrorCode {
+    /// A caller-supplied path, flag, or string is unusable.
     InvalidArgument = 1,
+    /// The rootfs or required file is not found.
     NotFound = 3,
+    /// The kernel, user namespace, or filesystem setup cannot run the container.
     Prerequisite = 4,
+    /// The container execution failed.
     Run = 5,
+    /// The operation is unsupported on this platform or operating system.
     Unsupported = 8,
+    /// An unexpected internal error occurred.
     Internal = 9,
+    /// The runtime is in the wrong state for this operation.
     State = 10,
 }
 
 impl ErrorCode {
+    /// Convert the error code to a process exit code.
     pub fn as_exit(self) -> i32 {
         self as i32
     }
@@ -54,6 +66,7 @@ impl ErrorCode {
 }
 
 impl Error {
+    /// Construct a new error with an error code, message, and detail.
     pub fn new(code: ErrorCode, message: impl Into<String>, detail: impl Into<String>) -> Self {
         let message = message.into();
         let message = if message.is_empty() {
@@ -68,14 +81,17 @@ impl Error {
         }
     }
 
+    /// The category and exit status for this failure.
     pub fn code(&self) -> ErrorCode {
         self.code
     }
 
+    /// A short description of what failed.
     pub fn message(&self) -> &str {
         &self.message
     }
 
+    /// Optional detailed diagnostics or stderr from the underlying engine.
     pub fn detail(&self) -> &str {
         &self.detail
     }

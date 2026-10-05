@@ -20,16 +20,22 @@ static OP: Mutex<()> = Mutex::new(());
 /// A line from the engine. Bytes are copied before the log callback returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LogRecord {
+    /// The stream type that produced this log entry.
     pub stream: LogStream,
+    /// The raw log message text, ending in a newline.
     pub message: String,
 }
 
 /// Which stream produced a [`LogRecord`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogStream {
+    /// Step progress and image layer download/extract progress.
     Progress,
+    /// General informational message from Buildah.
     Info,
+    /// Warning message for non-fatal issues.
     Warn,
+    /// Error message from an instruction or subsystem.
     Error,
 }
 
@@ -47,6 +53,7 @@ impl LogStream {
 /// Image identity returned by a build, tag is not included here, or a push.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageInfo {
+    /// Unique local identifier (hash) of the image.
     pub image_id: String,
     /// Manifest digest, when the engine produced one.
     pub digest: Option<String>,
@@ -74,6 +81,7 @@ struct CancelInner {
 }
 
 impl CancelToken {
+    /// Create a new cancellation token.
     pub fn new() -> Result<Self> {
         let id = unsafe { ffi::rob_cancel_new() };
         if id == 0 {
@@ -88,6 +96,7 @@ impl CancelToken {
         })
     }
 
+    /// Signal cancellation to any build or push using this token.
     pub fn cancel(&self) {
         #[cfg(target_os = "macos")]
         crate::macos::cancel(self.inner.id);
@@ -115,24 +124,41 @@ impl Drop for CancelInner {
 /// process-wide engine lock. It may run on a Go thread.
 #[derive(Clone)]
 pub struct BuildRequest {
+    /// Path to the Dockerfile or Containerfile to build.
     pub dockerfile: PathBuf,
+    /// Root directory for the build context (used for `COPY` and `ADD`).
     pub context_dir: PathBuf,
+    /// Optional name/tag to apply to the built image upon success.
     pub tag: Option<String>,
+    /// Target stage for multi-stage Dockerfiles.
     pub target: Option<String>,
+    /// Isolation mechanism used for `RUN` instructions.
     pub isolation: Isolation,
+    /// Output image manifest format (OCI or Docker schema 2).
     pub format: ImageFormat,
+    /// Policy determining when to pull base images from a remote registry.
     pub pull: PullPolicy,
+    /// Target operating system for the output image.
     pub os: Option<String>,
+    /// Target CPU architecture for the output image.
     pub arch: Option<String>,
+    /// Target CPU architecture variant.
     pub variant: Option<String>,
+    /// Build arguments passed to the build engine (`ARG` instructions).
     pub build_args: BTreeMap<String, String>,
+    /// Metadata key-value pairs applied to the output image (`LABEL` instructions).
     pub labels: BTreeMap<String, String>,
     /// Commit one layer per instruction. The default is on.
     pub layers: bool,
+    /// Ignore cached layers and rebuild all instructions.
     pub no_cache: bool,
+    /// Squash all resulting image layers into a single layer.
     pub squash: bool,
+    /// Suppress verbose progress output during the build.
     pub quiet: bool,
+    /// Optional cancellation token to stop the build in-flight.
     pub cancel: Option<CancelToken>,
+    /// Optional callback invoked for each line of progress and log output.
     pub on_log: Option<Arc<dyn Fn(LogRecord) + Send + Sync>>,
 }
 
@@ -186,6 +212,7 @@ impl std::fmt::Debug for BuildRequest {
 }
 
 impl BuildRequest {
+    /// Create a new build request for a Dockerfile and context directory.
     pub fn new(dockerfile: impl Into<PathBuf>, context_dir: impl Into<PathBuf>) -> Self {
         Self {
             dockerfile: dockerfile.into(),
@@ -194,6 +221,7 @@ impl BuildRequest {
         }
     }
 
+    /// Attach a logging callback to receive progress and engine log records.
     pub fn with_log<F>(mut self, callback: F) -> Self
     where
         F: Fn(LogRecord) + Send + Sync + 'static,
@@ -249,18 +277,26 @@ pub(crate) struct PreparedPaths {
 /// `password` is copied into the Go heap for the call and is not written to logs.
 #[derive(Clone)]
 pub struct PushRequest {
+    /// Name or ID of the local image to push.
     pub image: String,
+    /// Destination repository and tag reference in the remote registry.
     pub destination: String,
+    /// Username for registry authentication.
     pub username: String,
+    /// Password or token for registry authentication.
     pub password: String,
     /// `None` keeps the source manifest type.
     pub format: Option<ImageFormat>,
+    /// Allow connecting to HTTP registries or skipping TLS verification.
     pub insecure: bool,
+    /// Optional cancellation token to abort the push in-flight.
     pub cancel: Option<CancelToken>,
+    /// Optional callback to receive streaming push log records.
     pub on_log: Option<Arc<dyn Fn(LogRecord) + Send + Sync>>,
 }
 
 impl PushRequest {
+    /// Create a new push request for a local image and remote destination.
     pub fn new(image: impl Into<String>, destination: impl Into<String>) -> Self {
         Self {
             image: image.into(),
@@ -274,6 +310,7 @@ impl PushRequest {
         }
     }
 
+    /// Attach a logging callback to receive progress and push log records.
     pub fn with_log<F>(mut self, callback: F) -> Self
     where
         F: Fn(LogRecord) + Send + Sync + 'static,
@@ -308,6 +345,7 @@ pub struct Builder {
 }
 
 impl Builder {
+    /// Initialize and open the process-wide Buildah store with the given configuration.
     pub fn open(config: Config) -> Result<Self> {
         startup()?;
         #[cfg(target_os = "macos")]
@@ -327,6 +365,7 @@ impl Builder {
         })
     }
 
+    /// Build an OCI or Docker image according to the specified request.
     pub fn build(&self, request: BuildRequest) -> Result<ImageInfo> {
         let _ = self;
         let paths = request.prepare()?;
@@ -338,6 +377,7 @@ impl Builder {
         with_op(|| execute_build(&request, &paths))
     }
 
+    /// Add a new tag/name to an existing image in local storage.
     pub fn tag(&self, image: &str, new_name: &str) -> Result<()> {
         let _ = self;
         if image.is_empty() || new_name.is_empty() {
@@ -365,6 +405,7 @@ impl Builder {
         })
     }
 
+    /// Push an image from local storage to a remote registry.
     pub fn push(&self, request: PushRequest) -> Result<ImageInfo> {
         let _ = self;
         if request.image.is_empty() || request.destination.is_empty() {
@@ -382,6 +423,7 @@ impl Builder {
         with_op(|| execute_push(&request))
     }
 
+    /// Shut down the store and release graph driver mounts.
     pub fn shutdown(self) -> Result<()> {
         #[cfg(target_os = "macos")]
         {

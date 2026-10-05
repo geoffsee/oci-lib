@@ -41,6 +41,7 @@ pub enum ErrorCode {
 }
 
 impl ErrorCode {
+    /// Convert the error code to a process exit code.
     pub fn as_exit(self) -> i32 {
         self as i32
     }
@@ -77,6 +78,7 @@ impl ErrorCode {
 }
 
 impl Error {
+    /// Construct a new error with an error code, message, and detail.
     pub fn new(code: ErrorCode, message: impl Into<String>, detail: impl Into<String>) -> Self {
         let message = message.into();
         let message = if message.is_empty() {
@@ -91,14 +93,17 @@ impl Error {
         }
     }
 
+    /// The category and exit status for this failure.
     pub fn code(&self) -> ErrorCode {
         self.code
     }
 
+    /// A short description of what failed.
     pub fn message(&self) -> &str {
         &self.message
     }
 
+    /// Optional detailed diagnostics or stderr from the underlying engine.
     pub fn detail(&self) -> &str {
         &self.detail
     }
