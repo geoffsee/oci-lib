@@ -21,7 +21,10 @@ pub struct RunRequest {
     pub cwd: String,
     /// Hostname assigned inside the container's UTS namespace.
     pub hostname: String,
-    /// Optional directory where runtime state and lock files are placed.
+    /// Optional directory where runtime state and lock files are placed on Linux.
+    ///
+    /// On macOS, the host directory is created and validated while the guest uses
+    /// its own internal state root.
     pub state_root: Option<PathBuf>,
     /// Whether to unshare the network namespace (creates a private loopback).
     pub isolate_network: bool,
@@ -76,7 +79,10 @@ impl RunRequest {
         self
     }
 
-    /// Set an explicit directory for runtime state.
+    /// Set an explicit directory for runtime state on Linux.
+    ///
+    /// On macOS, the supplied host directory is created and validated while
+    /// the guest keeps its own internal state directory.
     pub fn state_root(mut self, state_root: impl Into<PathBuf>) -> Self {
         self.state_root = Some(state_root.into());
         self

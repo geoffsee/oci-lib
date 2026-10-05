@@ -22,7 +22,7 @@ static OP: Mutex<()> = Mutex::new(());
 pub struct LogRecord {
     /// The stream type that produced this log entry.
     pub stream: LogStream,
-    /// The raw log message text, ending in a newline.
+    /// The raw log message text received from the engine.
     pub message: String,
 }
 
