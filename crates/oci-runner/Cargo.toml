@@ -66,8 +66,3 @@ objc2-virtualization = { version = "0.3.2", default-features = false, features =
 
 [build-dependencies]
 cc = "1"
-
-[profile.release]
-lto = "thin"
-codegen-units = 1
-strip = "symbols"

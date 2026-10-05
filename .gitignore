@@ -2,14 +2,16 @@
 **/*.rs.bk
 *.pdb
 
-# Manual `go build -buildmode=c-archive` output in the shim directory.
+# Manual `go build -buildmode=c-archive` output in shim directories.
 # Headers under shim/include/ are the checked-in ABI.
-crates/buildah-ffi/shim/*.a
-crates/buildah-ffi/shim/*.h
+crates/*/shim/*.a
+crates/*/shim/*.h
 
 .idea
 .DS_Store
 
-# Linux guest image produced by guest/build.sh. Not part of the source tree.
+# Linux guest images produced by guest/build.sh. Not part of the source tree.
+crates/*/guest/out/
+crates/*/guest/cache/
 guest/out/
 guest/cache/

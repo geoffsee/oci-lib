@@ -15,8 +15,8 @@ use oci_builder::proto::{
 };
 
 use oci_builder::{
-    BuildRequest, Builder, CancelToken, Config, Error, ErrorCode, ImageFormat, Isolation, LogLevel,
-    LogRecord, PullPolicy, PushRequest, StorageDriver,
+    BuildRequest, Builder, CancelToken, Config, Error, ErrorCode, ImageFormat, ImageInfo,
+    Isolation, LogLevel, LogRecord, LogStream, PullPolicy, PushRequest, StorageDriver,
 };
 
 struct Tokens {
@@ -227,7 +227,7 @@ fn run_build(
     build: &Build,
     tokens: &Mutex<Tokens>,
     write: &Arc<Mutex<File>>,
-) -> Result<buildah_ffi::ImageInfo, Error> {
+) -> Result<ImageInfo, Error> {
     let Some(builder) = builder else {
         return Err(Error::new(ErrorCode::State, "store is not open", ""));
     };
@@ -268,7 +268,7 @@ fn run_push(
     push: &Push,
     tokens: &Mutex<Tokens>,
     write: &Arc<Mutex<File>>,
-) -> Result<buildah_ffi::ImageInfo, Error> {
+) -> Result<ImageInfo, Error> {
     let Some(builder) = builder else {
         return Err(Error::new(ErrorCode::State, "store is not open", ""));
     };
@@ -300,10 +300,10 @@ fn run_push(
 
 fn log_code(record: &LogRecord) -> u8 {
     match record.stream {
-        buildah_ffi::LogStream::Progress => rob_proto::LOG_PROGRESS,
-        buildah_ffi::LogStream::Info => rob_proto::LOG_INFO,
-        buildah_ffi::LogStream::Warn => rob_proto::LOG_WARN,
-        buildah_ffi::LogStream::Error => rob_proto::LOG_ERROR,
+        LogStream::Progress => oci_builder::proto::LOG_PROGRESS,
+        LogStream::Info => oci_builder::proto::LOG_INFO,
+        LogStream::Warn => oci_builder::proto::LOG_WARN,
+        LogStream::Error => oci_builder::proto::LOG_ERROR,
     }
 }
 

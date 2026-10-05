@@ -225,6 +225,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "oci-runner"
+version = "0.1.0"
+dependencies = [
+ "block2",
+ "cc",
+ "clap",
+ "dispatch2",
+ "libc",
+ "objc2",
+ "objc2-foundation",
+ "objc2-virtualization",
+]
+
+[[package]]
 name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
