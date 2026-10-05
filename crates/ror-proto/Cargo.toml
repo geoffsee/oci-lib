@@ -1,0 +1,9 @@
+[package]
+name = "ror-proto"
+version.workspace = true
+description = "Length-prefixed frames between a macOS host and the Linux oci-runner guest"
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]

@@ -1,0 +1,8 @@
+[build]
+rustc-wrapper = "scripts/macos-rustc-and-sign.sh"
+
+[target.aarch64-apple-darwin]
+runner = "scripts/macos-sign-and-run.sh"
+
+[target.x86_64-apple-darwin]
+runner = "scripts/macos-sign-and-run.sh"

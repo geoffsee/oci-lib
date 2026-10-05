@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/libcontainer-ffi", "crates/oci-runner", "crates/ror-proto"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.85"
+
+[workspace.dependencies]
+libcontainer-ffi = { path = "crates/libcontainer-ffi", version = "0.1.0" }
+ror-proto = { path = "crates/ror-proto", version = "0.1.0" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
