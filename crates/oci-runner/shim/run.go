@@ -77,7 +77,7 @@ func runContainer(req *C.ror_run_request) (int, *shimError) {
 		if err := os.MkdirAll(hostRoot, 0o755); err != nil {
 			return 0, fail(errInternal, "create host rootfs mountpoint", err.Error())
 		}
-		if err := syscall.Mount("/", hostRoot, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
+		if err := syscall.Mount("/", hostRoot, "", syscall.MS_BIND, ""); err != nil {
 			return 0, fail(errRun, "bind mount host root", err.Error())
 		}
 		defer func() {
