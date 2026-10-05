@@ -70,7 +70,9 @@ func runContainer(req *C.ror_run_request) (int, *shimError) {
 		return 0, fail(errInvalid, "state directory", err.Error())
 	}
 
+	isHostRoot := false
 	if rootfs == "/" {
+		isHostRoot = true
 		hostRoot := filepath.Join(stateRoot, "host-rootfs")
 		if err := os.MkdirAll(hostRoot, 0o755); err != nil {
 			return 0, fail(errInternal, "create host rootfs mountpoint", err.Error())
@@ -100,7 +102,7 @@ func runContainer(req *C.ror_run_request) (int, *shimError) {
 		specconv.ToRootless(spec)
 	}
 	spec.Linux.Namespaces = withNetwork(spec.Linux.Namespaces, isolate)
-	if !isolate {
+	if !isolate && !isHostRoot {
 		if err := bindResolv(spec, rootfs); err != nil {
 			return 0, fail(errRun, "resolv.conf", err.Error())
 		}
@@ -202,6 +204,11 @@ func bindResolv(spec *specs.Spec, rootfs string) error {
 	target := filepath.Join(rootfs, "etc", "resolv.conf")
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
+	}
+	if fi, err := os.Lstat(target); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		if _, err := os.Stat(target); err != nil && os.IsNotExist(err) {
+			_ = os.Remove(target)
+		}
 	}
 	if _, err := os.Stat(target); err != nil {
 		if !os.IsNotExist(err) {
