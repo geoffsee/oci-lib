@@ -11,7 +11,8 @@ on:
   push:
     tags:
       - "v*"
-  # Auto Tag pushes the tag with GITHUB_TOKEN, which does not fire push.
+  # Auto Tag pushes the tag with GITHUB_TOKEN, which does not fire push: tags.
+  # Explicit workflow_dispatch trigger allows Auto Tag and maintainers to dispatch release workflows.
   workflow_dispatch:
 
 permissions:
