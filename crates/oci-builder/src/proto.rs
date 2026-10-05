@@ -29,12 +29,27 @@ const GUEST_ERROR: u8 = 3;
 /// Host to guest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostFrame {
+    /// Initialize process-wide storage configuration.
     Init(Init),
+    /// Build an image from a Dockerfile and context.
     Build(Build),
-    Tag { image: String, new_name: String },
+    /// Apply a new tag to a locally stored image.
+    Tag {
+        /// Source image name or ID.
+        image: String,
+        /// New tag/name to apply.
+        new_name: String,
+    },
+    /// Push a local image to a remote registry.
     Push(Push),
+    /// Run diagnostic checks on the guest.
     Diagnose,
-    Cancel { token: u64 },
+    /// Cancel an in-flight operation.
+    Cancel {
+        /// Cancellation token ID.
+        token: u64,
+    },
+    /// Gracefully shut down the guest.
     Shutdown,
 }
 
@@ -44,36 +59,60 @@ pub enum HostFrame {
 /// empty. `log_level` is the Buildah level name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Init {
+    /// Graph root path in guest.
     pub storage_root: String,
+    /// Run root for transient state in guest.
     pub run_root: String,
+    /// Storage driver name (e.g. `vfs` or `overlay`).
     pub storage_driver: String,
+    /// Options passed to the storage driver.
     pub storage_opts: Vec<String>,
+    /// Path to registries.conf configuration file.
     pub registries_conf: String,
+    /// Path to signature policy file.
     pub signature_policy: String,
+    /// Path to authentication credentials file.
     pub auth_file: String,
+    /// Allow insecure HTTP registries or skip TLS verification.
     pub insecure: bool,
+    /// Buildah logging verbosity level.
     pub log_level: String,
 }
 
 /// One image build. Paths are guest paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Build {
+    /// Guest path to the Dockerfile.
     pub dockerfile: String,
+    /// Guest path to the build context directory.
     pub context_dir: String,
+    /// Target image name/tag.
     pub tag: String,
+    /// Target stage name for multi-stage builds.
     pub target: String,
+    /// Isolation mechanism string.
     pub isolation: String,
+    /// Manifest format string.
     pub format: String,
+    /// Base image pull policy string.
     pub pull: String,
+    /// Target operating system.
     pub os: String,
+    /// Target CPU architecture.
     pub arch: String,
+    /// Target architecture variant.
     pub variant: String,
+    /// Build arguments as `(key, value)` pairs.
     pub build_args: Vec<(String, String)>,
+    /// Image labels as `(key, value)` pairs.
     pub labels: Vec<(String, String)>,
     /// `1` commits a layer per instruction, `0` does not.
     pub layers: i32,
+    /// Ignore cached layers.
     pub no_cache: bool,
+    /// Squash all layers into a single layer.
     pub squash: bool,
+    /// Suppress build progress output.
     pub quiet: bool,
     /// `0` means the build cannot be cancelled.
     pub cancel_token: u64,
@@ -82,52 +121,77 @@ pub struct Build {
 /// One registry push. An empty `format` keeps the source manifest type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Push {
+    /// Name or ID of the local image to push.
     pub image: String,
+    /// Remote registry target reference.
     pub destination: String,
+    /// Registry username.
     pub username: String,
+    /// Registry password.
     pub password: String,
+    /// Manifest format string.
     pub format: String,
+    /// Allow insecure HTTP or skip TLS verification.
     pub insecure: bool,
+    /// Cancel token identifier, or 0 if not cancellable.
     pub cancel_token: u64,
 }
 
 /// Guest to host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestFrame {
+    /// Streaming log or progress line.
     Log {
+        /// Log stream identifier (0=Progress, 1=Info, 2=Warn, 3=Error).
         stream: u8,
+        /// Raw message text.
         message: String,
     },
+    /// Successful operation result.
     Result {
+        /// Built or pushed image ID.
         image_id: String,
+        /// Image manifest digest.
         digest: String,
+        /// Canonical image reference or tag.
         reference: String,
     },
+    /// Failure result from the guest.
     Error {
+        /// Numeric error code matching [`crate::ErrorCode`].
         code: i32,
+        /// Short error description.
         message: String,
+        /// Extended error diagnostics.
         detail: String,
     },
 }
 
-/// Log stream codes. They match the C ABI `ROB_LOG_*` values.
+/// Progress log stream code (matches C ABI `ROB_LOG_PROGRESS`).
 pub const LOG_PROGRESS: u8 = 0;
+/// Info log stream code (matches C ABI `ROB_LOG_INFO`).
 pub const LOG_INFO: u8 = 1;
+/// Warning log stream code (matches C ABI `ROB_LOG_WARN`).
 pub const LOG_WARN: u8 = 2;
+/// Error log stream code (matches C ABI `ROB_LOG_ERROR`).
 pub const LOG_ERROR: u8 = 3;
 
+/// Encode and write a host-to-guest frame with length prefix.
 pub fn write_host_frame(writer: &mut impl Write, frame: &HostFrame) -> io::Result<()> {
     write_body(writer, &encode_host(frame))
 }
 
+/// Encode and write a guest-to-host frame with length prefix.
 pub fn write_guest_frame(writer: &mut impl Write, frame: &GuestFrame) -> io::Result<()> {
     write_body(writer, &encode_guest(frame))
 }
 
+/// Read and decode a host-to-guest frame from a reader.
 pub fn read_host_frame(reader: &mut impl Read) -> io::Result<HostFrame> {
     decode_host(&read_body(reader)?)
 }
 
+/// Read and decode a guest-to-host frame from a reader.
 pub fn read_guest_frame(reader: &mut impl Read) -> io::Result<GuestFrame> {
     decode_guest(&read_body(reader)?)
 }

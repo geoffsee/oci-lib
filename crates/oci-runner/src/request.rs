@@ -11,12 +11,22 @@ const HOST_NAME_MAX: usize = 64;
 /// One foreground container.
 #[derive(Debug, Clone)]
 pub struct RunRequest {
+    /// Directory containing the root filesystem of the container.
     pub rootfs: PathBuf,
+    /// The command and arguments to execute.
     pub argv: Vec<String>,
+    /// Environment variables to set inside the container as `(key, value)` pairs.
     pub env: Vec<(String, String)>,
+    /// Initial working directory inside the container. Must be an absolute path.
     pub cwd: String,
+    /// Hostname assigned inside the container's UTS namespace.
     pub hostname: String,
+    /// Optional directory where runtime state and lock files are placed on Linux.
+    ///
+    /// On macOS, the host directory is created and validated while the guest uses
+    /// its own internal state root.
     pub state_root: Option<PathBuf>,
+    /// Whether to unshare the network namespace (creates a private loopback).
     pub isolate_network: bool,
 }
 
@@ -35,6 +45,7 @@ pub(crate) struct PreparedRun {
 }
 
 impl RunRequest {
+    /// Create a new container run request for the given rootfs and command.
     pub fn new(
         rootfs: impl Into<PathBuf>,
         argv: impl IntoIterator<Item = impl Into<String>>,
@@ -50,26 +61,34 @@ impl RunRequest {
         }
     }
 
+    /// Add an environment variable to the container.
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env.push((key.into(), value.into()));
         self
     }
 
+    /// Set the container working directory (must be an absolute path).
     pub fn cwd(mut self, cwd: impl Into<String>) -> Self {
         self.cwd = cwd.into();
         self
     }
 
+    /// Set the container hostname.
     pub fn hostname(mut self, hostname: impl Into<String>) -> Self {
         self.hostname = hostname.into();
         self
     }
 
+    /// Set an explicit directory for runtime state on Linux.
+    ///
+    /// On macOS, the supplied host directory is created and validated while
+    /// the guest keeps its own internal state directory.
     pub fn state_root(mut self, state_root: impl Into<PathBuf>) -> Self {
         self.state_root = Some(state_root.into());
         self
     }
 
+    /// Configure whether network namespace isolation is enabled.
     pub fn isolate_network(mut self, isolate: bool) -> Self {
         self.isolate_network = isolate;
         self

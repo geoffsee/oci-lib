@@ -33,6 +33,8 @@
 //! }
 //! ```
 
+#![warn(missing_docs)]
+
 pub mod proto;
 pub use proto as rob_proto;
 

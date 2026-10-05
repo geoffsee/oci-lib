@@ -27,6 +27,8 @@
 //!
 //! [`Runtime::shutdown`] stops the macOS guest. Dropping the [`Runtime`] does not.
 
+#![warn(missing_docs)]
+
 pub mod proto;
 pub use proto as ror_proto;
 
@@ -88,6 +90,10 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// Open the runtime.
+    ///
+    /// On Linux this initialises the engine in the current process. On macOS
+    /// this boots the lightweight virtual machine guest.
     pub fn open() -> Result<Self, Error> {
         #[cfg(target_os = "linux")]
         {
@@ -142,6 +148,10 @@ impl Runtime {
         }
     }
 
+    /// Shut down the runtime.
+    ///
+    /// On macOS this stops the virtual machine guest and releases resources.
+    /// On Linux this resets the runtime state.
     pub fn shutdown(self) -> Result<(), Error> {
         #[cfg(target_os = "linux")]
         {

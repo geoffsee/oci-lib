@@ -66,11 +66,16 @@ impl StorageDriver {
 /// Buildah log verbosity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LogLevel {
+    /// Most verbose logging, including low-level engine details.
     Trace,
+    /// Diagnostic information useful for debugging.
     Debug,
+    /// Informational messages on normal progress.
     Info,
+    /// Warning messages for non-fatal conditions.
     #[default]
     Warn,
+    /// Error messages only.
     Error,
 }
 
@@ -92,6 +97,7 @@ impl LogLevel {
 /// rootless isolation inside a user namespace and the default isolation as root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Isolation {
+    /// Follow `$BUILDAH_ISOLATION` or platform defaults.
     #[default]
     Default,
     /// OCI runtime (runc or crun) in a separate namespace.
@@ -116,6 +122,7 @@ impl Isolation {
 /// Manifest format written by a build, or requested for a push.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ImageFormat {
+    /// Open Container Initiative (OCI) image specification manifest.
     #[default]
     Oci,
     /// Docker schema 2.
@@ -134,10 +141,14 @@ impl ImageFormat {
 /// When a build may contact a registry for a base image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PullPolicy {
+    /// Pull base image only if not present in local store.
     #[default]
     IfMissing,
+    /// Always attempt to pull the latest image from the registry.
     Always,
+    /// Pull if newer version is found in registry than local cache.
     IfNewer,
+    /// Never contact registry; fail if base image is not present locally.
     Never,
 }
 

@@ -14,8 +14,9 @@ pub const VSOCK_PORT: u32 = 5253;
 /// Largest accepted body. Larger lengths are rejected before allocation.
 pub const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024;
 
-/// Stdio stream codes. They match the C ABI `ROR_STDOUT` and `ROR_STDERR`.
+/// Standard output stream identifier (matches C ABI `ROR_STDOUT`).
 pub const STDOUT: u8 = 1;
+/// Standard error stream identifier (matches C ABI `ROR_STDERR`).
 pub const STDERR: u8 = 2;
 
 const HOST_RUN: u8 = 1;
@@ -28,52 +29,73 @@ const GUEST_ERROR: u8 = 3;
 /// Host to guest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostFrame {
+    /// Request a container execution.
     Run(Run),
+    /// Request graceful agent shutdown.
     Shutdown,
 }
 
 /// One container run. `rootfs` is a guest path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
+    /// Guest filesystem path to the container root directory.
     pub rootfs: String,
+    /// Command line arguments to execute.
     pub argv: Vec<String>,
+    /// Environment variables formatted as `KEY=VALUE` strings.
     pub env: Vec<String>,
+    /// Working directory inside the container.
     pub cwd: String,
+    /// Container hostname.
     pub hostname: String,
     /// Empty means the guest picks its own state directory.
     pub state_root: String,
+    /// Whether to unshare the network namespace.
     pub isolate_network: bool,
 }
 
 /// Guest to host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestFrame {
+    /// Streaming stdout or stderr chunk.
     Output {
+        /// Stream identifier: 1 for stdout, 2 for stderr.
         stream: u8,
+        /// Raw byte payload from the stream.
         data: Vec<u8>,
     },
+    /// Final exit status of the executed container.
     Status {
+        /// Process exit code.
         code: i32,
     },
+    /// An execution or protocol error encountered by the guest.
     Error {
+        /// Numeric error code matching [`crate::ErrorCode`].
         code: i32,
+        /// Human-readable error description.
         message: String,
+        /// Extended error diagnostics or stderr trace.
         detail: String,
     },
 }
 
+/// Encode and write a host-to-guest frame with length prefix.
 pub fn write_host_frame(writer: &mut impl Write, frame: &HostFrame) -> io::Result<()> {
     write_body(writer, &encode_host(frame))
 }
 
+/// Encode and write a guest-to-host frame with length prefix.
 pub fn write_guest_frame(writer: &mut impl Write, frame: &GuestFrame) -> io::Result<()> {
     write_body(writer, &encode_guest(frame))
 }
 
+/// Read and decode a host-to-guest frame from a reader.
 pub fn read_host_frame(reader: &mut impl Read) -> io::Result<HostFrame> {
     decode_host(&read_body(reader)?)
 }
 
+/// Read and decode a guest-to-host frame from a reader.
 pub fn read_guest_frame(reader: &mut impl Read) -> io::Result<GuestFrame> {
     decode_guest(&read_body(reader)?)
 }
