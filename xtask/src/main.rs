@@ -3,7 +3,7 @@
 //! Repository tasks, run with `cargo xtask <task>`.
 //!
 //! `cargo xtask guest [oci-builder|oci-runner]...` builds the Linux guest the
-//! macOS host boots and writes `crates/<package>/guest/out/{vmlinuz,initramfs}`.
+//! macOS host boots and writes `crates/<package>/guest/out/{vmlinuz,initramfs,attestation.json}`.
 //! Run it on Linux, on the same architecture as the Mac (arm64 for Apple
 //! Silicon). With no package it builds both.
 
@@ -92,17 +92,33 @@ fn guest(packages: &[String]) -> Result<()> {
         add_shared_libraries(&mut archive, &bin, package)?;
 
         let initramfs = out.join("initramfs");
-        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
-        gz.write_all(&archive.to_newc())
-            .and_then(|()| gz.finish())
-            .and_then(|bytes| fs::write(&initramfs, bytes))
+        // Hash the gzip bytes just written, not the uncompressed cpio. That is
+        // the file macOS embeds and the release publishes.
+        let gz_bytes = {
+            let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+            gz.write_all(&archive.to_newc())
+                .and_then(|()| gz.finish())
+                .map_err(|err| format!("compressing {}: {err}", initramfs.display()))?
+        };
+        fs::write(&initramfs, &gz_bytes)
             .map_err(|err| format!("writing {}: {err}", initramfs.display()))?;
-        fs::copy(&kernel, out.join("vmlinuz"))
+        let vmlinuz = out.join("vmlinuz");
+        fs::copy(&kernel, &vmlinuz)
             .map_err(|err| format!("copying {}: {err}", kernel.display()))?;
+        let attestation = out.join("attestation.json");
+        let json = attestation_json(
+            package,
+            &sha256(&vmlinuz)?,
+            &sha256_bytes(&gz_bytes),
+            &archive.entries,
+        );
+        fs::write(&attestation, json)
+            .map_err(|err| format!("writing {}: {err}", attestation.display()))?;
         eprintln!(
-            "wrote {}/vmlinuz and {}",
+            "wrote {}/vmlinuz, {}, and {}",
             out.display(),
-            initramfs.display()
+            initramfs.display(),
+            attestation.display()
         );
     }
     Ok(())
@@ -333,11 +349,76 @@ fn sha256(path: &Path) -> Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(hasher
-        .finalize()
+    Ok(hex_digest(hasher.finalize()))
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex_digest(hasher.finalize())
+}
+
+fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
+    bytes
+        .as_ref()
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect())
+        .collect()
+}
+
+/// Bill of materials for one guest. `entries` is the archiver's member map,
+/// already sorted by path, not a parse of the cpio that was just written.
+/// `mode` keeps the file-type bits stored on the cpio entry.
+fn attestation_json(
+    package: &str,
+    kernel_sha256: &str,
+    initramfs_sha256: &str,
+    entries: &BTreeMap<String, (u32, Vec<u8>)>,
+) -> String {
+    let mut out = String::from("{\n");
+    out.push_str(&format!("  \"package\": {},\n", json_string(package)));
+    out.push_str(&format!(
+        "  \"kernel_sha256\": {},\n",
+        json_string(kernel_sha256)
+    ));
+    out.push_str(&format!(
+        "  \"initramfs_sha256\": {},\n",
+        json_string(initramfs_sha256)
+    ));
+    out.push_str("  \"members\": [\n");
+    for (index, (path, (mode, data))) in entries.iter().enumerate() {
+        if index != 0 {
+            out.push_str(",\n");
+        }
+        out.push_str(&format!(
+            "    {{\"path\": {}, \"mode\": {mode}, \"size\": {}, \"sha256\": {}}}",
+            json_string(path),
+            data.len(),
+            json_string(&sha256_bytes(data)),
+        ));
+    }
+    if !entries.is_empty() {
+        out.push('\n');
+    }
+    out.push_str("  ]\n}\n");
+    out
+}
+
+fn json_string(value: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if (ch as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn read(path: &Path) -> Result<Vec<u8>> {
@@ -482,5 +563,51 @@ mod tests {
             Path::new("/lib/x/libz.so.1.2")
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn attestation_lists_sorted_members_and_hashes_their_bytes() {
+        let mut archive = Archive::default();
+        archive.file("z", 0o644, b"z".to_vec());
+        archive.symlink("a/link", "target");
+        archive.file("a/b", 0o755, b"hello".to_vec());
+        let json = attestation_json(
+            "oci-runner",
+            "kernelhash",
+            "initramfshash",
+            &archive.entries,
+        );
+        assert!(json.contains("\"package\": \"oci-runner\""));
+        assert!(json.contains("\"kernel_sha256\": \"kernelhash\""));
+        assert!(json.contains("\"initramfs_sha256\": \"initramfshash\""));
+        let dir = json.find("\"path\": \"a\"").expect("directory member");
+        let file = json.find("\"path\": \"a/b\"").expect("file member");
+        let link = json.find("\"path\": \"a/link\"").expect("symlink member");
+        let last = json.find("\"path\": \"z\"").expect("z member");
+        assert!(dir < file && file < link && link < last);
+        assert!(json.contains(&format!("\"mode\": {}", S_IFDIR | 0o755)));
+        assert!(json.contains(&format!("\"mode\": {}", S_IFREG | 0o755)));
+        assert!(json.contains(&format!("\"mode\": {}", S_IFLNK | 0o777)));
+        assert!(json.contains(&format!("\"mode\": {}", S_IFREG | 0o644)));
+        assert!(json.contains("\"size\": 5"));
+        assert!(json.contains("\"size\": 6"));
+        let hello = sha256_bytes(b"hello");
+        assert_eq!(
+            hello,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+        assert!(json.contains(&hello));
+        assert!(json.contains(&sha256_bytes(b"target")));
+        assert!(json.contains(&sha256_bytes(b"")));
+    }
+
+    #[test]
+    fn attestation_escapes_member_paths() {
+        let mut entries = BTreeMap::new();
+        entries.insert("a\"b\\c".to_string(), (0o644, b"x".to_vec()));
+        let json = attestation_json("oci-builder", "k", "i", &entries);
+        let escaped = json_string("a\"b\\c");
+        assert_eq!(escaped, "\"a\\\"b\\\\c\"");
+        assert!(json.contains(&format!("\"path\": {escaped}")));
     }
 }

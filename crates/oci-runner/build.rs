@@ -87,21 +87,32 @@ mod guest {
     use super::*;
     use std::io::Read;
 
+    // Same parser diagnose uses. Compiled here so a mismatch fails the build
+    // before any guest bytes are embedded.
+    // `#[path]` inside this inline module is relative to `guest/`, not build.rs.
+    #[path = "../src/guest_attest.rs"]
+    mod attest;
+    #[path = "../src/guest_check.rs"]
+    mod check;
+
     /// Copy the Linux guest into OUT_DIR so macos.rs can `include_bytes!` it.
     /// The macOS binary only boots these embedded bytes, so a build without a
     /// guest image fails. Sources, in order: `ROR_GUEST_KERNEL` and
-    /// `ROR_GUEST_INITRD`, guest/out, then the download cache. A cache miss
-    /// downloads this version's images from the GitHub release and verifies them.
+    /// `ROR_GUEST_INITRD` plus a sibling `attestation.json`, guest/out (which
+    /// must include `attestation.json`), then the download cache. A cache miss
+    /// downloads this version's images from the GitHub release and verifies
+    /// them. Versions after 0.1.7 also require the release attestation asset.
     pub(super) fn embed_guest(manifest: &Path, out_dir: &Path) -> Result<(), String> {
         println!("cargo:rerun-if-env-changed=ROR_GUEST_KERNEL");
         println!("cargo:rerun-if-env-changed=ROR_GUEST_INITRD");
         println!("cargo:rerun-if-env-changed=ROR_GUEST_CACHE");
         println!("cargo:rerun-if-changed=guest/out/vmlinuz");
         println!("cargo:rerun-if-changed=guest/out/initramfs");
+        println!("cargo:rerun-if-changed=guest/out/attestation.json");
 
         let kernel_dest = out_dir.join("ror-guest-vmlinuz.zst");
         let initrd_dest = out_dir.join("ror-guest-initramfs.zst");
-        let (kernel, initrd) = guest_sources(manifest, out_dir)?;
+        let (kernel, initrd, attestation) = guest_sources(manifest, out_dir)?;
         println!("cargo:rerun-if-changed={}", kernel.display());
         println!("cargo:rerun-if-changed={}", initrd.display());
         let kernel_bytes =
@@ -122,6 +133,9 @@ mod guest {
         }
         write_zstd(&kernel_bytes, &kernel_dest)?;
         write_zstd(&initrd_bytes, &initrd_dest)?;
+        let attestation_dest = out_dir.join("ror-guest-attestation.json");
+        std::fs::write(&attestation_dest, attestation)
+            .map_err(|err| format!("writing {}: {err}", attestation_dest.display()))?;
         Ok(())
     }
 
@@ -131,12 +145,16 @@ mod guest {
         std::fs::write(dest, compressed).map_err(|err| format!("writing {}: {err}", dest.display()))
     }
 
-    fn guest_sources(manifest: &Path, out_dir: &Path) -> Result<(PathBuf, PathBuf), String> {
+    fn guest_sources(
+        manifest: &Path,
+        out_dir: &Path,
+    ) -> Result<(PathBuf, PathBuf, String), String> {
         match (env::var("ROR_GUEST_KERNEL"), env::var("ROR_GUEST_INITRD")) {
             (Ok(kernel), Ok(initrd)) => {
                 let pair = (PathBuf::from(kernel), PathBuf::from(initrd));
                 if pair.0.is_file() && pair.1.is_file() {
-                    return Ok(pair);
+                    let attestation = require_local_attestation(&pair.0, &pair.1)?;
+                    return Ok((pair.0, pair.1, attestation));
                 }
                 return Err(format!(
                     "ROR_GUEST_KERNEL ({}) or ROR_GUEST_INITRD ({}) is missing",
@@ -152,14 +170,15 @@ mod guest {
         let dir = manifest.join("guest/out");
         let pair = (dir.join("vmlinuz"), dir.join("initramfs"));
         if pair.0.is_file() && pair.1.is_file() {
-            return Ok(pair);
+            let attestation = require_local_attestation(&pair.0, &pair.1)?;
+            return Ok((pair.0, pair.1, attestation));
         }
         cached_guest(out_dir)
     }
 
     /// Files land in the cache only after their checksum matches, so a cached
     /// file is a verified one and its presence skips the download.
-    fn cached_guest(out_dir: &Path) -> Result<(PathBuf, PathBuf), String> {
+    fn cached_guest(out_dir: &Path) -> Result<(PathBuf, PathBuf, String), String> {
         let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
         let (kernel_name, kernel_sha) = match arch.as_str() {
             "aarch64" => (
@@ -197,29 +216,80 @@ mod guest {
             );
             download(&url, &kernel, kernel_sha)?;
         }
+        let release = format!(
+            "{}/releases/download/v{version}",
+            repository.trim_end_matches('/')
+        );
         if !initrd.is_file() {
-            let release = format!(
-                "{}/releases/download/v{version}",
-                repository.trim_end_matches('/')
-            );
             let asset = format!("{package}-v{version}-{arch}-initramfs");
-            let sums = dir.join("SHA256SUMS");
-            curl(&format!("{release}/SHA256SUMS"), &sums)?;
-            let text = std::fs::read_to_string(&sums)
-                .map_err(|err| format!("reading {}: {err}", sums.display()))?;
-            let _ = std::fs::remove_file(&sums);
-            let sha = text
-                .lines()
-                .filter_map(|line| {
-                    let mut fields = line.split_whitespace();
-                    Some((fields.next()?, fields.next()?))
-                })
-                .find(|(_, name)| name.trim_start_matches("./") == asset)
-                .map(|(sha, _)| sha.to_string())
-                .ok_or_else(|| format!("{release}/SHA256SUMS does not list {asset}"))?;
+            let sha = release_asset_sha(&release, &dir, &asset)?;
             download(&format!("{release}/{asset}"), &initrd, &sha)?;
         }
-        Ok((kernel, initrd))
+        let attestation = if check::version_requires_guest_attestation(&version) {
+            let path = dir.join("attestation.json");
+            if !path.is_file() {
+                let asset = format!("{package}-v{version}-{arch}-guest-attestation.json");
+                let sha = release_asset_sha(&release, &dir, &asset)?;
+                download(&format!("{release}/{asset}"), &path, &sha)?;
+            }
+            println!("cargo:rerun-if-changed={}", path.display());
+            let json = std::fs::read_to_string(&path)
+                .map_err(|err| format!("reading {}: {err}", path.display()))?;
+            accept_attestation(&json, &kernel, &initrd).map_err(|err| {
+                format!(
+                    "{err}; refusing to embed a guest whose attestation does not match the downloaded files"
+                )
+            })?;
+            json
+        } else {
+            // 0.1.7 and earlier published no attestation asset. Keep the
+            // SHA256SUMS check above and record the hashes of the files we embed.
+            check::minimal_attestation(&package, &sha256(&kernel)?, &sha256(&initrd)?)
+        };
+        Ok((kernel, initrd, attestation))
+    }
+
+    /// `attestation.json` sits next to the initramfs. A missing file or a hash
+    /// that does not match the blobs on disk means the guest was not built by
+    /// the current xtask.
+    fn require_local_attestation(kernel: &Path, initrd: &Path) -> Result<String, String> {
+        let attestation = match initrd.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir.join("attestation.json"),
+            _ => PathBuf::from("attestation.json"),
+        };
+        if !attestation.is_file() {
+            return Err(format!(
+                "missing {}; rerun `cargo xtask guest`",
+                attestation.display()
+            ));
+        }
+        println!("cargo:rerun-if-changed={}", attestation.display());
+        let json = std::fs::read_to_string(&attestation)
+            .map_err(|err| format!("reading {}: {err}", attestation.display()))?;
+        accept_attestation(&json, kernel, initrd)
+            .map_err(|err| format!("{err}; rerun `cargo xtask guest`"))?;
+        Ok(json)
+    }
+
+    fn accept_attestation(json: &str, kernel: &Path, initrd: &Path) -> Result<(), String> {
+        let attestation = attest::parse(json)?;
+        check::hashes_match(&attestation, &sha256(kernel)?, &sha256(initrd)?)
+    }
+
+    fn release_asset_sha(release: &str, dir: &Path, asset: &str) -> Result<String, String> {
+        let sums = dir.join("SHA256SUMS");
+        curl(&format!("{release}/SHA256SUMS"), &sums)?;
+        let text = std::fs::read_to_string(&sums)
+            .map_err(|err| format!("reading {}: {err}", sums.display()))?;
+        let _ = std::fs::remove_file(&sums);
+        text.lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                Some((fields.next()?, fields.next()?))
+            })
+            .find(|(_, name)| name.trim_start_matches("./") == asset)
+            .map(|(sha, _)| sha.to_string())
+            .ok_or_else(|| format!("{release}/SHA256SUMS does not list {asset}"))
     }
 
     fn download(url: &str, dest: &Path, sha: &str) -> Result<(), String> {
