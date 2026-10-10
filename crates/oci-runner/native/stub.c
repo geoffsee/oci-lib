@@ -32,12 +32,17 @@ static void set_buf(ror_buffer *buf, const char *text) {
 	buf->len = n;
 }
 
+/* build.rs sets this on macOS builds with the `vm` feature turned off. */
+#ifndef ROR_STUB_DETAIL
+#define ROR_STUB_DETAIL ""
+#endif
+
 static int32_t unsupported(ror_error *err) {
 	if (err != NULL) {
 		err->code = ROR_ERR_UNSUPPORTED;
 		err->_pad = 0;
 		set_buf(&err->message, "oci-runner is available on Linux and macOS only");
-		set_buf(&err->detail, "");
+		set_buf(&err->detail, ROR_STUB_DETAIL);
 	}
 	return ROR_ERR_UNSUPPORTED;
 }

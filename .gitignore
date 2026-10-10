@@ -10,7 +10,7 @@ crates/*/shim/*.h
 .idea
 .DS_Store
 
-# Linux guest images produced by guest/build.sh. Not part of the source tree.
+# Linux guest images produced by `cargo xtask guest`. Not part of the source tree.
 crates/*/guest/out/
 crates/*/guest/cache/
 guest/out/

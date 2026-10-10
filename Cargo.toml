@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/oci-builder", "crates/oci-runner"]
+members = ["crates/oci-builder", "crates/oci-runner", "xtask"]
 
 [workspace.package]
 version = "0.1.7"

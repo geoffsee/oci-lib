@@ -42,9 +42,9 @@ mod builder;
 mod config;
 mod error;
 mod ffi;
-#[cfg(target_os = "macos")]
+#[cfg(rob_vm)]
 mod macos;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(rob_vm, test))]
 mod shares;
 
 // Pull native/unshare_early.c into the link so its constructor runs.

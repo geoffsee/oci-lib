@@ -152,8 +152,7 @@ jobs:
       - name: Build the Apple Silicon guests
         if: matrix.guest
         run: |
-          ./crates/oci-builder/guest/build.sh
-          ./crates/oci-runner/guest/build.sh
+          cargo xtask guest oci-builder oci-runner
       - uses: actions/upload-artifact@v4
         if: matrix.guest
         with:
@@ -189,9 +188,6 @@ jobs:
           name: guest-aarch64-runner
           path: crates/oci-runner/guest/out
       - name: Embed the guests and build
-        env:
-          ROB_REQUIRE_EMBEDDED_GUEST: "1"
-          ROR_REQUIRE_EMBEDDED_GUEST: "1"
         run: |
           cargo build --release --locked -p oci-builder
           cargo build --release --locked -p oci-runner
@@ -244,7 +240,10 @@ jobs:
               rm -rf "$stage"
             done
           done
-          (cd packages && sha256sum ./*.tar.gz > SHA256SUMS)
+          # macOS build.rs downloads these when guest/out is absent.
+          cp artifacts/guest-aarch64-builder/initramfs "packages/oci-builder-${version}-aarch64-initramfs"
+          cp artifacts/guest-aarch64-runner/initramfs "packages/oci-runner-${version}-aarch64-initramfs"
+          (cd packages && sha256sum ./*.tar.gz ./*-initramfs > SHA256SUMS)
       - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -259,7 +258,7 @@ jobs:
             printf '%s\n' \
               "## Binaries" \
               "" \
-              "Archives contain \`oci-builder\` and \`oci-runner\`. The Apple Silicon binaries embed the Linux kernel and initramfs and write them to the cache directory on first use. Linux binaries are built on Ubuntu 24.04 and need that glibc plus \`libseccomp.so.2\`." \
+              "Archives contain \`oci-builder\` and \`oci-runner\`. The Apple Silicon binaries embed the zstd-compressed Linux kernel and initramfs and write them to the cache directory on first use. The \`*-initramfs\` assets are what macOS builds from source download when \`guest/out\` is absent. Linux binaries are built on Ubuntu 24.04 and need that glibc plus \`libseccomp.so.2\`." \
               ""
             gh api --method POST \
               -H "Accept: application/vnd.github+json" \

@@ -6,7 +6,7 @@
 Rust library (`oci_builder`) and CLI (`oci-builder`) that embeds [Buildah](https://github.com/containers/buildah) directly in-process. There is no Buildah daemon and no `buildah` executable on `$PATH`.
 
 - **Linux**: Runs the Buildah engine directly in-process via a statically linked Go C-archive (`-buildmode=c-archive`) with priority 101 user namespace setup.
-- **macOS**: Runs the engine inside a lightweight Linux guest managed by Apple's Virtualization framework over virtio-vsock.
+- **macOS** (default `vm` feature): Runs the engine inside a lightweight Linux guest managed by Apple's Virtualization framework over virtio-vsock.
 - **Other OSes**: Links a lightweight stub returning `ErrorCode::Unsupported`.
 
 ---
@@ -110,4 +110,4 @@ oci-builder --root /tmp/graph --runroot /tmp/run --storage-driver vfs \
   - Builds requiring network access during `RUN` instructions require network helper utilities (`netavark` or CNI).
 - **macOS Guest Ephemeral Storage**: On macOS, builds execute inside a managed Linux Virtualization guest. Output artifacts (like pushed `docker-archive` tarballs) must target shared virtiofs mount directories to persist onto the macOS host.
 - **Storage Driver in Nested Environments**: When running inside an existing Docker or container environment that lacks nested overlayfs kernel support, the `vfs` storage driver must be selected (`--storage-driver vfs`).
-- **Platform Support**: Fully supported on Linux and macOS (Apple Silicon and x86_64). Other operating systems link a stub implementation that returns `ErrorCode::Unsupported`.
+- **Platform Support**: Fully supported on Linux and macOS (the default `vm` feature embeds the Apple Virtualization guest). Other operating systems, and macOS with `vm` turned off, link a stub implementation that returns `ErrorCode::Unsupported`.

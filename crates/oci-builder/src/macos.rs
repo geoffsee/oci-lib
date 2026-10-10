@@ -233,10 +233,11 @@ pub(crate) fn diagnose() -> Result<String, Error> {
     }
     match locate_artifacts() {
         Ok((kernel, initrd)) => {
-            let embedded = kernel.starts_with(guest_cache_dir());
-            let source = if embedded { "embedded guest" } else { "guest" };
-            lines.push(format!("[ok] {source} kernel {}", kernel.display()));
-            lines.push(format!("[ok] {source} initramfs {}", initrd.display()));
+            lines.push(format!("[ok] embedded guest kernel {}", kernel.display()));
+            lines.push(format!(
+                "[ok] embedded guest initramfs {}",
+                initrd.display()
+            ));
         }
         Err(err) => {
             blocked = true;
@@ -932,59 +933,13 @@ fn ns_error_text(err: &NSError) -> String {
     err.localizedDescription().to_string()
 }
 
-const EMBEDDED_KERNEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rob-guest-vmlinuz"));
-const EMBEDDED_INITRD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rob-guest-initramfs"));
+const EMBEDDED_KERNEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rob-guest-vmlinuz.zst"));
+const EMBEDDED_INITRD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rob-guest-initramfs.zst"));
 
+/// The guest always boots from the images embedded at build time. They are
+/// written to the cache directory because the boot loader takes file URLs.
 fn locate_artifacts() -> Result<(PathBuf, PathBuf), Error> {
-    match (env::var("ROB_GUEST_KERNEL"), env::var("ROB_GUEST_INITRD")) {
-        (Ok(kernel), Ok(initrd)) => {
-            return require_pair(PathBuf::from(kernel), PathBuf::from(initrd));
-        }
-        (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
-            return Err(fail(
-                ErrorCode::Prerequisite,
-                "set both ROB_GUEST_KERNEL and ROB_GUEST_INITRD",
-            ));
-        }
-        (Err(_), Err(_)) => {}
-    }
-    if !EMBEDDED_KERNEL.is_empty() && !EMBEDDED_INITRD.is_empty() {
-        return materialize_embedded();
-    }
-    let mut tried = Vec::new();
-    let mut candidates = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("guest/out")];
-    if let Ok(cwd) = env::current_dir() {
-        let mut dir = cwd;
-        for _ in 0..6 {
-            candidates.push(dir.join("guest/out"));
-            if !dir.pop() {
-                break;
-            }
-        }
-    }
-    if let Ok(exe) = env::current_exe() {
-        let mut dir = exe;
-        for _ in 0..8 {
-            if !dir.pop() {
-                break;
-            }
-            candidates.push(dir.join("guest/out"));
-        }
-    }
-    for candidate in candidates {
-        tried.push(candidate.display().to_string());
-        if let Ok(pair) = require_pair(candidate.join("vmlinuz"), candidate.join("initramfs")) {
-            return Ok(pair);
-        }
-    }
-    Err(Error::new(
-        ErrorCode::Prerequisite,
-        "Linux guest kernel and initramfs were not found",
-        format!(
-            "looked for guest/out under {}. Rebuild with guest/out present to embed the images, or set ROB_GUEST_KERNEL and ROB_GUEST_INITRD.",
-            tried.join(", ")
-        ),
-    ))
+    materialize_embedded()
 }
 
 fn materialize_embedded() -> Result<(PathBuf, PathBuf), Error> {
@@ -995,9 +950,18 @@ fn materialize_embedded() -> Result<(PathBuf, PathBuf), Error> {
     ));
     let kernel = dir.join("vmlinuz");
     let initrd = dir.join("initramfs");
-    write_embedded(&kernel, EMBEDDED_KERNEL)?;
-    write_embedded(&initrd, EMBEDDED_INITRD)?;
+    write_embedded(&kernel, &decompress(EMBEDDED_KERNEL)?)?;
+    write_embedded(&initrd, &decompress(EMBEDDED_INITRD)?)?;
     Ok((kernel, initrd))
+}
+
+fn decompress(bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    zstd::decode_all(bytes).map_err(|err| {
+        fail(
+            ErrorCode::Internal,
+            format!("decompressing the embedded guest: {err}"),
+        )
+    })
 }
 
 fn guest_cache_dir() -> PathBuf {
@@ -1036,21 +1000,6 @@ fn write_embedded(path: &Path, bytes: &[u8]) -> Result<(), Error> {
             format!("renaming {} to {}: {err}", tmp.display(), path.display()),
         )
     })
-}
-
-fn require_pair(kernel: PathBuf, initrd: PathBuf) -> Result<(PathBuf, PathBuf), Error> {
-    if kernel.is_file() && initrd.is_file() {
-        Ok((kernel, initrd))
-    } else {
-        Err(fail(
-            ErrorCode::Prerequisite,
-            format!(
-                "missing guest kernel {} or initramfs {}",
-                kernel.display(),
-                initrd.display()
-            ),
-        ))
-    }
 }
 
 fn io_err(err: io::Error) -> Error {

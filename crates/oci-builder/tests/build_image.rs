@@ -367,7 +367,7 @@ fn run_build(
 
 #[test]
 fn macos_scratch_copy_example_when_guest_image_is_present() {
-    if !cfg!(target_os = "macos") {
+    if !cfg!(rob_vm) {
         eprintln!("skipping macOS guest build on this host");
         return;
     }
@@ -393,8 +393,6 @@ fn macos_scratch_copy_example_when_guest_image_is_present() {
     let run = dir.path().join("run");
     let context = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/scratch-copy");
     let output = Command::new(bin())
-        .env("ROB_GUEST_KERNEL", &kernel)
-        .env("ROB_GUEST_INITRD", &initrd)
         .args([
             "--root",
             graph.to_str().unwrap(),

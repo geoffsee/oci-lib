@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#![cfg_attr(target_os = "macos", allow(dead_code))]
+#![cfg_attr(rob_vm, allow(dead_code))]
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::config::{Config, ImageFormat, Isolation, PullPolicy, StorageDriver};
 use crate::error::{Error, ErrorCode, Result, read_buf};
-#[cfg_attr(target_os = "macos", allow(unused_imports))]
+#[cfg_attr(rob_vm, allow(unused_imports))]
 use crate::ffi::{
     self, RobBuffer, RobBuildRequest, RobConfig, RobError, RobPushRequest, RobResult,
 };
@@ -98,15 +98,15 @@ impl CancelToken {
 
     /// Signal cancellation to any build or push using this token.
     pub fn cancel(&self) {
-        #[cfg(target_os = "macos")]
+        #[cfg(rob_vm)]
         crate::macos::cancel(self.inner.id);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         unsafe {
             ffi::rob_cancel(self.inner.id)
         }
     }
 
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(rob_vm), allow(dead_code))]
     pub(crate) fn raw_id(&self) -> u64 {
         self.inner.id
     }
@@ -348,14 +348,14 @@ impl Builder {
     /// Initialize and open the process-wide Buildah store with the given configuration.
     pub fn open(config: Config) -> Result<Self> {
         startup()?;
-        #[cfg(target_os = "macos")]
+        #[cfg(rob_vm)]
         {
             crate::macos::open(config)?;
             Ok(Builder { _private: () })
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         let held = HeldConfig::from_config(&config)?;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         with_op(|| unsafe {
             let mut err = RobError::zero();
             let code = ffi::rob_init(&held.raw, &mut err);
@@ -369,11 +369,11 @@ impl Builder {
     pub fn build(&self, request: BuildRequest) -> Result<ImageInfo> {
         let _ = self;
         let paths = request.prepare()?;
-        #[cfg(target_os = "macos")]
+        #[cfg(rob_vm)]
         {
             crate::macos::build(&request, &paths)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         with_op(|| execute_build(&request, &paths))
     }
 
@@ -387,15 +387,15 @@ impl Builder {
                 "",
             ));
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(rob_vm)]
         {
             crate::macos::tag(image, new_name)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         let image = cstring(image.as_bytes())?;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         let new_name = cstring(new_name.as_bytes())?;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         with_op(|| unsafe {
             let mut err = RobError::zero();
             let code = ffi::rob_tag(image.as_ptr(), new_name.as_ptr(), &mut err);
@@ -415,21 +415,21 @@ impl Builder {
                 "",
             ));
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(rob_vm)]
         {
             crate::macos::push(&request)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         with_op(|| execute_push(&request))
     }
 
     /// Shut down the store and release graph driver mounts.
     pub fn shutdown(self) -> Result<()> {
-        #[cfg(target_os = "macos")]
+        #[cfg(rob_vm)]
         {
             crate::macos::shutdown()
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         with_op(|| unsafe {
             let mut err = RobError::zero();
             let code = ffi::rob_shutdown(&mut err);
@@ -443,11 +443,11 @@ impl Builder {
     /// Warnings are included in an `Ok` report.
     pub fn diagnose() -> Result<String> {
         startup()?;
-        #[cfg(target_os = "macos")]
+        #[cfg(rob_vm)]
         {
             crate::macos::diagnose()
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         with_op(|| unsafe {
             let mut buf = RobBuffer::zero();
             let mut err = RobError::zero();
@@ -481,11 +481,11 @@ impl Builder {
 /// the guest, on the first build, tag, or push. On other non-Linux builds
 /// this returns [`ErrorCode::Unsupported`] and does not touch a Buildah engine.
 pub fn startup() -> Result<()> {
-    #[cfg(target_os = "macos")]
+    #[cfg(rob_vm)]
     {
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(rob_vm))]
     with_op(|| unsafe {
         let mut err = RobError::zero();
         let code = ffi::rob_startup(&mut err);
@@ -846,13 +846,13 @@ mod tests {
 
     #[test]
     fn startup_on_the_stub_is_unsupported() {
-        #[cfg(all(rob_stub, not(target_os = "macos")))]
+        #[cfg(all(rob_stub, not(rob_vm)))]
         {
             let err = startup().expect_err("stub startup");
             assert_eq!(err.code(), ErrorCode::Unsupported);
             assert!(err.to_string().to_lowercase().contains("linux"));
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(rob_vm)]
         startup().expect("macos startup does not boot a guest");
     }
 

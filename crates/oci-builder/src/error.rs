@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#![cfg_attr(target_os = "macos", allow(dead_code))]
+#![cfg_attr(rob_vm, allow(dead_code))]
 
 use std::fmt;
 

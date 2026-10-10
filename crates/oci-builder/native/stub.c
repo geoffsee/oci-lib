@@ -34,12 +34,17 @@ static void set_buf(rob_buffer *b, const char *s) {
 	b->len = n;
 }
 
+/* build.rs sets this on macOS builds with the `vm` feature turned off. */
+#ifndef ROB_STUB_DETAIL
+#define ROB_STUB_DETAIL ""
+#endif
+
 static int32_t unsupported(rob_error *err) {
 	if (err != NULL) {
 		err->code = ROB_ERR_UNSUPPORTED;
 		err->_pad = 0;
 		set_buf(&err->message, "Buildah is available on Linux only");
-		set_buf(&err->detail, "");
+		set_buf(&err->detail, ROB_STUB_DETAIL);
 	}
 	return ROB_ERR_UNSUPPORTED;
 }

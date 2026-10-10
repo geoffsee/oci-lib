@@ -36,12 +36,12 @@ mod error;
 mod ffi;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "macos")]
+#[cfg(ror_vm)]
 mod macos;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", ror_vm)))]
 mod other;
 mod request;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(ror_vm, test))]
 mod shares;
 
 #[cfg(target_os = "linux")]
@@ -71,11 +71,11 @@ pub fn startup() -> Result<(), Error> {
     {
         linux::startup()
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(ror_vm)]
     {
         Ok(())
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", ror_vm)))]
     {
         other::startup()
     }
@@ -100,14 +100,14 @@ impl Runtime {
             linux::open()?;
             Ok(Self { _private: () })
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(ror_vm)]
         {
             macos::open()?;
             Ok(Self { _private: () })
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", ror_vm)))]
         {
-            let _ = other::startup()?;
+            other::startup()?;
             Ok(Self { _private: () })
         }
     }
@@ -133,18 +133,14 @@ impl Runtime {
         {
             linux::run(&prepared, on_output)
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(ror_vm)]
         {
             macos::run(&prepared, on_output)
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", ror_vm)))]
         {
             let _ = (prepared, on_output);
-            Err(Error::new(
-                ErrorCode::Unsupported,
-                "oci-runner is available on Linux and macOS only",
-                "",
-            ))
+            Err(other::unsupported())
         }
     }
 
@@ -157,11 +153,11 @@ impl Runtime {
         {
             linux::shutdown()
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(ror_vm)]
         {
             macos::shutdown()
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", ror_vm)))]
         {
             Ok(())
         }
@@ -176,18 +172,19 @@ impl Runtime {
         {
             linux::diagnose()
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(ror_vm)]
         {
             macos::diagnose()
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", ror_vm)))]
         {
             other::diagnose()
         }
     }
 }
 
-#[cfg(test)]
+// The stub has no engine to start, so these tests need Linux or the macOS guest.
+#[cfg(all(test, any(target_os = "linux", ror_vm)))]
 mod tests {
     use super::*;
 
@@ -196,7 +193,7 @@ mod tests {
         startup().expect("startup");
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(ror_vm)]
     #[test]
     fn diagnose_without_a_guest_image_is_a_prerequisite_error() {
         match Runtime::diagnose() {

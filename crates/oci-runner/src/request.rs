@@ -32,6 +32,7 @@ pub struct RunRequest {
 
 /// Checked request. Paths are absolute.
 #[derive(Debug, Clone)]
+#[cfg_attr(not(any(target_os = "linux", ror_vm)), allow(dead_code))]
 pub(crate) struct PreparedRun {
     pub rootfs: PathBuf,
     pub argv: Vec<String>,

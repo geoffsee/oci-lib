@@ -6,7 +6,7 @@
 Rust library (`oci_runner`) and CLI (`oci-runner`) for running foreground containers with embedded [libcontainer](https://github.com/opencontainers/runc/tree/main/libcontainer). There is no `runc`, `crun`, or `podman` executable required on `$PATH`.
 
 - **Linux**: Executes containers in-process via a statically linked Go C-archive (`-buildmode=c-archive`) with priority 101 `nsexec` constructor, custom seccomp filtering, and native Linux namespaces.
-- **macOS**: Boots a lightweight Linux guest through Apple's Virtualization framework and coordinates execution over virtio-vsock (port 5253).
+- **macOS** (default `vm` feature): Boots a lightweight Linux guest through Apple's Virtualization framework and coordinates execution over virtio-vsock (port 5253).
 - **Other OSes**: Links a lightweight stub returning `ErrorCode::Unsupported`.
 
 ---
@@ -117,4 +117,4 @@ oci-runner run \
 - **Not a Complete OCI CLI**: `oci-runner` implements `diagnose` and `run`. It is not a drop-in replacement for the multi-command OCI runtime specification (`create`, `start`, `kill`, `delete`, `state`).
 - **macOS Host Isolation**: On macOS, containers run in a Linux Virtualization guest kernel. They do not share the host macOS kernel or network interfaces directly; host filesystems must be shared via virtiofs.
 - **Linux Privilege Requirements**: In-process namespace isolation requires either `root` privileges or unprivileged user namespace support enabled in the host kernel (`/proc/sys/kernel/unprivileged_userns_clone = 1`). Mounting certain filesystems or creating devices requires appropriate Linux capabilities.
-- **Platform Support**: Fully supported on Linux and macOS (Apple Silicon and x86_64). Other operating systems link a stub implementation that returns `ErrorCode::Unsupported`.
+- **Platform Support**: Fully supported on Linux and macOS (the default `vm` feature embeds the Apple Virtualization guest). Other operating systems, and macOS with `vm` turned off, link a stub implementation that returns `ErrorCode::Unsupported`.
