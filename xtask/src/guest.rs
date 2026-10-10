@@ -168,7 +168,11 @@ pub const UDHCPC_SCRIPT: &str = r#"#!/bin/busybox sh
 case "$1" in
     bound|renew)
         netmask=${subnet:-255.255.255.0}
-        ifconfig "$interface" "$ip" netmask "$netmask" up
+        # Apple VZ NAT can reset large TLS handshakes at an Ethernet MTU of
+        # 1500. Smaller TCP segments avoid that path limit while preserving
+        # certificate verification and Go's default post-quantum TLS groups.
+        # 1280 also accommodates IPv6's minimum link MTU.
+        ifconfig "$interface" "$ip" netmask "$netmask" mtu 1280 up
         if [ -n "$router" ]; then
             route add default gw "$router" 2>/dev/null || true
         fi

@@ -17,6 +17,7 @@ use std::process::{Command, ExitCode};
 
 use sha2::{Digest, Sha256};
 
+mod ca;
 mod guest;
 
 #[path = "../../crates/oci-builder/src/protocol_version.rs"]
@@ -72,6 +73,9 @@ fn guest(packages: &[String]) -> Result<()> {
     let cache = target_dir.join("guest-cache");
     fs::create_dir_all(&cache).map_err(|err| format!("creating {}: {err}", cache.display()))?;
 
+    // Debian/Ubuntu and Alpine install their maintained public roots here.
+    // Fail before building anything if the build environment lacks them.
+    let ca_bundle = ca::load(&Path::new("/").join(ca::BUNDLE_PATH))?;
     let kernel = fetch_kernel(&cache)?;
     let busybox = build_busybox(&cache)?;
     for package in packages {
@@ -81,6 +85,7 @@ fn guest(packages: &[String]) -> Result<()> {
         fs::create_dir_all(&out).map_err(|err| format!("creating {}: {err}", out.display()))?;
 
         let mut archive = Archive::default();
+        archive.file(ca::BUNDLE_PATH, 0o644, ca_bundle.clone());
         archive.file("bin/busybox", 0o755, read(&busybox)?);
         let init = match package {
             "oci-builder" => guest::BUILDER_INIT,
@@ -554,6 +559,8 @@ mod tests {
         archive.file("bin/tool", 0o755, b"#!/bin/sh\necho hi\n".to_vec());
         archive.file("lib/x/libz.so.1.2", 0o644, vec![7; 4099]);
         archive.symlink("lib/libz.so.1", "/lib/x/libz.so.1.2");
+        let ca_bundle = ca::test_ca();
+        archive.file(ca::BUNDLE_PATH, 0o644, ca_bundle.clone());
 
         let dir = env::temp_dir().join(format!("xtask-newc-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -574,6 +581,15 @@ mod tests {
 
         let tool = dir.join("bin/tool");
         assert_eq!(fs::read(&tool).unwrap(), b"#!/bin/sh\necho hi\n");
+        let bundle = dir.join(ca::BUNDLE_PATH);
+        assert_eq!(ca::load(&bundle).unwrap(), ca_bundle);
+        assert_eq!(
+            fs::metadata(&bundle).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        let attestation = attestation_json("oci-builder", "0.1.9", 2, "k", "i", &archive.entries);
+        assert!(attestation.contains(ca::BUNDLE_PATH));
+        assert!(attestation.contains(&sha256_bytes(&ca_bundle)));
         assert_eq!(
             fs::metadata(&tool).unwrap().permissions().mode() & 0o777,
             0o755

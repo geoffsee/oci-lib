@@ -68,6 +68,13 @@ pub(crate) fn compatibility_match(
             attestation.protocol_version
         ));
     }
+    if !attestation
+        .members
+        .iter()
+        .any(|path| path == "etc/ssl/certs/ca-certificates.crt")
+    {
+        return Err("guest is missing the CA trust bundle etc/ssl/certs/ca-certificates.crt; rebuild with cargo xtask guest on Linux (with ca-certificates installed)".into());
+    }
     Ok(())
 }
 
@@ -188,5 +195,18 @@ mod tests {
         let attestation = parse(&json).unwrap();
         let err = compatibility_match(&attestation, "oci-builder", "0.1.9", 2).unwrap_err();
         assert!(err.contains("protocol version"), "{err}");
+    }
+
+    #[test]
+    fn compatibility_requires_ca_bundle_even_when_hashes_and_versions_match() {
+        let json = minimal_attestation("oci-builder", "0.1.9", 2, "abc", "def");
+        let mut attestation = parse(&json).unwrap();
+        hashes_match(&attestation, "abc", "def").unwrap();
+        let err = compatibility_match(&attestation, "oci-builder", "0.1.9", 2).unwrap_err();
+        assert!(err.contains("CA trust bundle"), "{err}");
+        attestation
+            .members
+            .push("etc/ssl/certs/ca-certificates.crt".into());
+        compatibility_match(&attestation, "oci-builder", "0.1.9", 2).unwrap();
     }
 }

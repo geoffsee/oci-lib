@@ -59,7 +59,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc pkg-config libseccomp-dev
           if [ "${{ matrix.guest }}" = "true" ]; then
-            sudo apt-get install -y musl-tools musl-dev linux-libc-dev make bzip2 cpio curl
+            sudo apt-get install -y musl-tools musl-dev linux-libc-dev make bzip2 cpio curl ca-certificates
             arch=$(uname -m)
             dest="/usr/include/${arch}-linux-musl"
             sudo mkdir -p "$dest"
@@ -102,7 +102,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import hashlib, json, pathlib
+          import gzip, hashlib, json, pathlib, subprocess
 
           expected_version = pathlib.Path("Cargo.toml").read_text().split('version = "', 1)[1].split('"', 1)[0]
           for package in ("oci-builder", "oci-runner"):
@@ -116,9 +116,25 @@ jobs:
                   )
               if document.get("protocol_version") != 2:
                   raise SystemExit(f"{package}: unsupported guest protocol {document.get('protocol_version')!r}")
+              actual = hashlib.sha256((root / "vmlinuz").read_bytes()).hexdigest()
+              if document.get("kernel_sha256") != actual:
+                  raise SystemExit(f"{package}: kernel hash does not match attestation")
               actual = hashlib.sha256((root / "initramfs").read_bytes()).hexdigest()
               if document.get("initramfs_sha256") != actual:
                   raise SystemExit(f"{package}: initramfs hash does not match attestation")
+              ca_path = "etc/ssl/certs/ca-certificates.crt"
+              ca = next((m for m in document["members"] if m["path"] == ca_path), None)
+              if ca is None or ca["size"] == 0:
+                  raise SystemExit(f"{package}: missing CA trust bundle")
+              bundle = subprocess.run(
+                  ["cpio", "-i", "--to-stdout", "--quiet", ca_path],
+                  input=gzip.decompress((root / "initramfs").read_bytes()),
+                  stdout=subprocess.PIPE, check=True,
+              ).stdout
+              if len(bundle) != ca["size"] or hashlib.sha256(bundle).hexdigest() != ca["sha256"]:
+                  raise SystemExit(f"{package}: CA bundle does not match attestation")
+              if b"-----BEGIN CERTIFICATE-----" not in bundle:
+                  raise SystemExit(f"{package}: CA bundle contains no PEM certificates")
           PY
       - uses: actions/upload-artifact@v4
         if: matrix.guest

@@ -53,6 +53,10 @@ cargo install oci-runner
 
 A macOS build embeds the guest from `crates/<crate>/guest/out/` when present. Otherwise it downloads the release's kernel and initramfs into `~/Library/Caches/<crate>/downloads` (override with `ROB_GUEST_CACHE` / `ROR_GUEST_CACHE`), verifies their checksums, and embeds them.
 
+`cargo xtask guest` also embeds the Linux build system's public CA bundle at `/etc/ssl/certs/ca-certificates.crt` in both guests. Install `ca-certificates` in the Linux build environment before running it. The bundle is validated and recorded in the guest attestation; host builds reject guests that omit it. Registry HTTPS uses these trust roots with certificate verification enabled.
+
+The guests use a 1280-byte network MTU to avoid connection resets on large TLS handshakes through Apple Virtualization NAT. TLS verification and the engine's default key exchange algorithms remain enabled.
+
 ---
 
 ## Quick Start (Rust API)
