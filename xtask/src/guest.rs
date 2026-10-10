@@ -55,7 +55,18 @@ done
 "#;
 
 /// PID 1 for the oci-builder guest. Mounts the shares the host exported, puts
-/// the graph root on an ext4 image, brings up NAT, then runs the engine agent.
+/// the graph root on an ext image, brings up NAT, then runs the engine agent.
+///
+/// The filesystem is the image file itself (no partition table). The format
+/// comment in the script identifies ext2, mounted as ext4 when the kernel
+/// accepts it. `resize2fs` is not in this guest, and enlarging the file
+/// without `resize2fs` does not enlarge the filesystem. An existing nonempty
+/// `rob-store.img` is left mounted unchanged: never shrink it, never rerun
+/// `mke2fs` on it, and never delete it from the guest.
+///
+/// To recreate the store, work on a copy first: shut the VM down, copy the
+/// image aside, delete `rob-store.img`, and let the next boot create a new
+/// sparse 8GiB image.
 pub const BUILDER_INIT: &str = r#"#!/bin/busybox sh
 # PID 1 for the macOS Virtualization.framework guest.
 # Mounts the virtiofs tags the host exported, brings up NAT, then runs the engine agent.
@@ -91,9 +102,11 @@ done
 
 # The graph root cannot live directly on Apple virtiofs. containers/storage
 # chowns layer directories to uid 0, and the host share then returns EPERM for
-# mkdir and rename. Keep the share, and mount an ext2 image from it at the
+# mkdir and rename. Keep the share, and mount an ext image from it at the
 # path the engine was given. The run root is ephemeral.
+# Format: ext2, no partition table. Mounted as ext4 when the kernel accepts it.
 mkdir -p /mnt/.host-root /mnt/root /mnt/runroot
+root_mounted=0
 if mount -t virtiofs root /mnt/.host-root 2>/dev/null; then
     img=/mnt/.host-root/rob-store.img
     if [ ! -s "$img" ]; then
@@ -101,13 +114,26 @@ if mount -t virtiofs root /mnt/.host-root 2>/dev/null; then
         # fills up on an ordinary base image.
         dd if=/dev/zero of="$img" bs=1M seek=8192 count=0
         mke2fs -F "$img" >/dev/null
+    else
+        # No resize2fs in this guest; rewriting a nonempty image would drop the store.
+        echo "oci-builder: existing rob-store.img left unchanged; this guest does not grow it. Recreation: shut the VM down, copy the image aside, delete rob-store.img, and let the next boot create a new sparse 8GiB image." >&2
     fi
-    if ! mount -t ext4 "$img" /mnt/root 2>/dev/null; then
-        mount -t ext2 "$img" /mnt/root
+    if mount -t ext4 "$img" /mnt/root 2>/dev/null || mount -t ext2 "$img" /mnt/root; then
+        root_mounted=1
     fi
-else
-    mount -t tmpfs tmpfs /mnt/root
+elif mount -t tmpfs tmpfs /mnt/root; then
+    root_mounted=1
 fi
+if [ "$root_mounted" != 1 ]; then
+    echo "oci-builder: failed to mount /mnt/root; not setting TMPDIR" >&2
+    exit 1
+fi
+# Buildah scratch space cannot live on Apple virtiofs or a RAM tmpfs.
+mkdir -p /mnt/root/tmp
+chmod 1777 /mnt/root/tmp
+export TMPDIR=/mnt/root/tmp
+export TMP=/mnt/root/tmp
+export TEMP=/mnt/root/tmp
 mount -t tmpfs tmpfs /mnt/runroot
 
 ip link set lo up 2>/dev/null || true
