@@ -86,6 +86,24 @@ oci-builder --root /tmp/graph --runroot /tmp/run --storage-driver vfs \
   push localhost/app:latest localhost:5000/app:latest --insecure
 ```
 
+To attach a Notary X.509 signature as an OCI referrer, provide a PKCS#8 key
+and a DER certificate chain (leaf first):
+
+```bash
+oci-builder --signing-key signing-key.der \
+  --signing-cert leaf.der --signing-cert intermediate.der \
+  push localhost/app:latest localhost:5000/app:latest --insecure --sign
+```
+
+Pull verification is enabled with a Notary trust policy and DER trust anchors.
+Each `FROM` image is verified before Buildah is allowed to pull it:
+
+```bash
+oci-builder --trust-policy trustpolicy.json \
+  --trust-anchor ca:my-registry=ca.der \
+  build -f Dockerfile .
+```
+
 `policy.json` for a local store without remote signature checks:
 ```json
 {"default":[{"type":"insecureAcceptAnything"}]}

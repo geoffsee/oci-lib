@@ -383,6 +383,7 @@ impl std::fmt::Debug for PushRequest {
 #[derive(Debug)]
 pub struct Builder {
     _private: (),
+    config: Config,
 }
 
 impl Builder {
@@ -390,9 +391,14 @@ impl Builder {
     pub fn open(config: Config) -> Result<Self> {
         startup()?;
         #[cfg(rob_vm)]
+        let retained_config = config.clone();
+        #[cfg(rob_vm)]
         {
             crate::macos::open(config)?;
-            Ok(Builder { _private: () })
+            Ok(Builder {
+                _private: (),
+                config: retained_config,
+            })
         }
         #[cfg(not(rob_vm))]
         let held = HeldConfig::from_config(&config)?;
@@ -402,13 +408,17 @@ impl Builder {
             let code = ffi::rob_init(&held.raw, &mut err);
             let result = take_status(code, &err);
             ffi::rob_error_free(&mut err);
-            result.map(|()| Builder { _private: () })
+            result.map(|()| Builder {
+                _private: (),
+                config: config.clone(),
+            })
         })
     }
 
     /// Build an OCI or Docker image according to the specified request.
     pub fn build(&self, request: BuildRequest) -> Result<ImageInfo> {
         let _ = self;
+        self.verify_pull_references(&request)?;
         let paths = request.prepare()?;
         #[cfg(rob_vm)]
         {
@@ -416,6 +426,100 @@ impl Builder {
         }
         #[cfg(not(rob_vm))]
         with_op(|| execute_build(&request, &paths))
+    }
+
+    /// Verify OCI Notary referrers for all remote `FROM` images in a build.
+    ///
+    /// Verification is enabled when [`Config::trust_policy`] is set. The
+    /// check runs before Buildah starts pulling a base image, so a missing or
+    /// invalid signature stops the build before untrusted bytes enter storage.
+    pub fn verify_image(
+        &self,
+        reference: &str,
+        username: &str,
+        password: &str,
+        insecure: bool,
+    ) -> Result<()> {
+        let Some(policy_path) = &self.config.trust_policy else {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "no Notary trust policy is configured",
+                "set Config.trust_policy before calling verify_image",
+            ));
+        };
+        let policy_bytes = std::fs::read(policy_path).map_err(|err| {
+            Error::new(
+                ErrorCode::InvalidArgument,
+                "cannot read Notary trust policy",
+                err.to_string(),
+            )
+        })?;
+        let policy =
+            oci_util::signature::TrustPolicyDocument::from_bytes(&policy_bytes).map_err(|err| {
+                Error::new(
+                    ErrorCode::InvalidArgument,
+                    "invalid Notary trust policy",
+                    err.to_string(),
+                )
+            })?;
+        let mut anchors = BTreeMap::new();
+        for (store, paths) in &self.config.trust_anchors {
+            let mut certs = Vec::with_capacity(paths.len());
+            for path in paths {
+                certs.push(std::fs::read(path).map_err(|err| {
+                    Error::new(
+                        ErrorCode::InvalidArgument,
+                        "cannot read Notary trust anchor",
+                        format!("{}: {err}", path.display()),
+                    )
+                })?);
+            }
+            anchors.insert(store.clone(), certs);
+        }
+        let registry = crate::registry::Registry::parse(
+            reference,
+            username,
+            password,
+            insecure || self.config.insecure,
+        )?;
+        registry.verify(&policy, &anchors).map(|_| ())
+    }
+
+    fn verify_pull_references(&self, request: &BuildRequest) -> Result<()> {
+        if self.config.trust_policy.is_none() {
+            return Ok(());
+        }
+        let dockerfile = std::fs::read_to_string(&request.dockerfile).map_err(|err| {
+            Error::new(
+                ErrorCode::InvalidArgument,
+                "cannot read Dockerfile for signature verification",
+                err.to_string(),
+            )
+        })?;
+        let credentials = self
+            .config
+            .auth_file
+            .as_deref()
+            .map(crate::registry::credentials_from_auth_file)
+            .transpose()?
+            .unwrap_or_default();
+        for line in dockerfile.lines() {
+            let mut words = line.split_whitespace();
+            if !words
+                .next()
+                .is_some_and(|word| word.eq_ignore_ascii_case("from"))
+            {
+                continue;
+            }
+            let image = words
+                .find(|word| !word.starts_with("--"))
+                .unwrap_or_default();
+            if image.is_empty() || image.eq_ignore_ascii_case("scratch") || image.starts_with("$") {
+                continue;
+            }
+            self.verify_image(image, &credentials.0, &credentials.1, false)?;
+        }
+        Ok(())
     }
 
     /// Add a new tag/name to an existing image in local storage.
@@ -461,7 +565,7 @@ impl Builder {
             crate::macos::push(&request)
         }
         #[cfg(not(rob_vm))]
-        with_op(|| execute_push(&request))
+        with_op(|| execute_push(&request, &self.config))
     }
 
     /// Shut down the store and release graph driver mounts.
@@ -630,7 +734,7 @@ fn execute_build(request: &BuildRequest, paths: &PreparedPaths) -> Result<ImageI
     }
 }
 
-fn execute_push(request: &PushRequest) -> Result<ImageInfo> {
+fn execute_push(request: &PushRequest, config: &Config) -> Result<ImageInfo> {
     let image = cstring(request.image.as_bytes())?;
     let destination = cstring(request.destination.as_bytes())?;
     let username = opt_cstring(&request.username)?;
@@ -665,7 +769,30 @@ fn execute_push(request: &PushRequest) -> Result<ImageInfo> {
         let mut err = RobError::zero();
         let code = ffi::rob_push(&raw, &mut out, &mut err);
         let result = match take_status(code, &err) {
-            Ok(()) => Ok(take_info(&out)),
+            Ok(()) => {
+                let info = take_info(&out);
+                if request.sign {
+                    let material = crate::notary::validate_signing_config(
+                        config.signing_key.as_deref(),
+                        &config.signing_cert_chain,
+                    )?
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::InvalidArgument,
+                            "signature requested but no signing key is configured",
+                            "set Config.signing_key",
+                        )
+                    })?;
+                    let registry = crate::registry::Registry::parse(
+                        &request.destination,
+                        &request.username,
+                        &request.password,
+                        request.insecure || config.insecure,
+                    )?;
+                    registry.sign_push(&material)?;
+                }
+                Ok(info)
+            }
             Err(error) => Err(error),
         };
         ffi::rob_result_free(&mut out);

@@ -5,8 +5,10 @@
 //! After an image is pushed, optionally sign the manifest as a referrer artifact.
 
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::{Error, ErrorCode};
+use oci_util::signature::{self, Descriptor, Payload, SignatureManifest, SignedAttributes};
 
 /// Validate signing configuration and load key/certificate material.
 pub(crate) fn validate_signing_config(
@@ -62,7 +64,50 @@ pub(crate) struct SigningMaterial {
     pub certificates: Vec<Vec<u8>>,
 }
 
-// TODO: sign(material: &SigningMaterial, manifest: &Payload) -> Result<Vec<u8>>
-// Fetch the pushed manifest from the registry after successful push, sign it
-// with the provided key and cert chain using oci_util::signature::{sign_jws,sign_cose},
-// and upload the signature as a referrer artifact using Buildah's remote API.
+/// Sign an image manifest using the Notary X.509 JWS profile.
+pub(crate) fn sign_manifest(
+    material: &SigningMaterial,
+    target: Descriptor,
+) -> Result<(SignatureManifest, Vec<u8>), Error> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| {
+            Error::new(
+                ErrorCode::Internal,
+                "clock is before the Unix epoch",
+                err.to_string(),
+            )
+        })?
+        .as_secs() as i64;
+    let payload = Payload {
+        target_artifact: target,
+    };
+    let envelope = signature::sign_jws(
+        &payload,
+        &material.key,
+        &material.certificates,
+        &SignedAttributes::x509(now),
+        Some("oci-builder"),
+    )
+    .map_err(|err| {
+        Error::new(
+            ErrorCode::Push,
+            "cannot sign pushed manifest",
+            err.to_string(),
+        )
+    })?;
+    let manifest = signature::signature_manifest(
+        &payload.target_artifact,
+        signature::JWS_MEDIA_TYPE,
+        &envelope,
+        &material.certificates,
+    )
+    .map_err(|err| {
+        Error::new(
+            ErrorCode::Push,
+            "cannot build signature manifest",
+            err.to_string(),
+        )
+    })?;
+    Ok((manifest, envelope))
+}

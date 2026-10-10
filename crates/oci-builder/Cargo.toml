@@ -30,6 +30,11 @@ default-policy = []
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+base64 = "0.23.1"
+oci-util = { path = "../oci-util" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+ureq = { version = "3.2.0", default-features = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"

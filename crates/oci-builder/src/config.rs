@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Process-wide storage and registry settings.
@@ -43,6 +44,11 @@ pub struct Config {
     /// Paths to certificate chain files (DER encoded) for Notary signatures.
     /// Leaf certificate comes first. Required when signing_key is set.
     pub signing_cert_chain: Vec<PathBuf>,
+    /// Path to a Notary trust policy used to verify OCI referrers before pulls.
+    pub trust_policy: Option<PathBuf>,
+    /// DER trust anchors keyed by trust-store name (`ca:name` or
+    /// `signingAuthority:name`).
+    pub trust_anchors: BTreeMap<String, Vec<PathBuf>>,
 }
 
 impl Default for Config {
@@ -59,6 +65,8 @@ impl Default for Config {
             log_level: LogLevel::Warn,
             signing_key: None,
             signing_cert_chain: Vec::new(),
+            trust_policy: None,
+            trust_anchors: BTreeMap::new(),
         }
     }
 }

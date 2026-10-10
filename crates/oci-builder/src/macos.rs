@@ -202,7 +202,7 @@ pub(crate) fn push(request: &crate::builder::PushRequest) -> Result<ImageInfo, E
         })?;
     }
 
-    rpc(
+    let info = rpc(
         HostFrame::Push(rob_proto::Push {
             image: request.image.clone(),
             destination: request.destination.clone(),
@@ -221,7 +221,30 @@ pub(crate) fn push(request: &crate::builder::PushRequest) -> Result<ImageInfo, E
                 .unwrap_or(0),
         }),
         request.on_log.clone(),
-    )
+    )?;
+    if request.sign {
+        with_session(|shared| {
+            let material = crate::notary::validate_signing_config(
+                shared.config.signing_key.as_deref(),
+                &shared.config.signing_cert_chain,
+            )?
+            .ok_or_else(|| {
+                fail(
+                    ErrorCode::InvalidArgument,
+                    "signature requested but no signing key is configured",
+                )
+            })?;
+            let registry = crate::registry::Registry::parse(
+                &request.destination,
+                &request.username,
+                &request.password,
+                request.insecure || shared.config.insecure,
+            )?;
+            registry.sign_push(&material)?;
+            Ok(())
+        })?;
+    }
+    Ok(info)
 }
 
 pub(crate) fn shutdown() -> Result<(), Error> {
