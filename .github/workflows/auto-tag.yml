@@ -132,7 +132,9 @@ jobs:
 
           lock_path = Path("Cargo.lock")
           parts = lock_path.read_text().split("[[package]]\n")
-          names = {"oci-builder", "oci-runner"}
+          # Internal workspace crates inherit this version too, even though
+          # they are not separate publication targets.
+          names = {"oci-builder", "oci-runner", "oci-util"}
           found = set()
           out = [parts[0]]
           for part in parts[1:]:

@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "oci-builder"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "base64 0.23.1",
  "block2",
@@ -837,7 +837,7 @@ dependencies = [
 
 [[package]]
 name = "oci-runner"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "block2",
  "cc",
@@ -853,7 +853,7 @@ dependencies = [
 
 [[package]]
 name = "oci-util"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "base64 0.23.1",
  "ciborium",
