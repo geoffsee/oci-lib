@@ -37,6 +37,12 @@ pub struct Config {
     pub insecure: bool,
     /// Log level used for Buildah's own logger. Progress lines are separate.
     pub log_level: LogLevel,
+    /// Path to a PKCS8 private key for signing pushed images with Notary.
+    /// When set, images are signed after push.
+    pub signing_key: Option<PathBuf>,
+    /// Paths to certificate chain files (DER encoded) for Notary signatures.
+    /// Leaf certificate comes first. Required when signing_key is set.
+    pub signing_cert_chain: Vec<PathBuf>,
 }
 
 impl Default for Config {
@@ -51,6 +57,8 @@ impl Default for Config {
             auth_file: None,
             insecure: false,
             log_level: LogLevel::Warn,
+            signing_key: None,
+            signing_cert_chain: Vec::new(),
         }
     }
 }

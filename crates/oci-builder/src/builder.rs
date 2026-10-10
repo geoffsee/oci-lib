@@ -325,6 +325,8 @@ pub struct PushRequest {
     pub cancel: Option<CancelToken>,
     /// Optional callback to receive streaming push log records.
     pub on_log: Option<Arc<dyn Fn(LogRecord) + Send + Sync>>,
+    /// Sign the pushed image if a signing key is configured.
+    pub sign: bool,
 }
 
 impl PushRequest {
@@ -339,6 +341,7 @@ impl PushRequest {
             insecure: false,
             cancel: None,
             on_log: None,
+            sign: false,
         }
     }
 
@@ -348,6 +351,12 @@ impl PushRequest {
         F: Fn(LogRecord) + Send + Sync + 'static,
     {
         self.on_log = Some(Arc::new(callback));
+        self
+    }
+
+    /// Sign the pushed image if a key is configured.
+    pub fn with_signature(mut self) -> Self {
+        self.sign = true;
         self
     }
 }

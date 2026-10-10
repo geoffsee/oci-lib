@@ -191,6 +191,17 @@ pub(crate) fn tag(image: &str, new_name: &str) -> Result<(), Error> {
 
 pub(crate) fn push(request: &crate::builder::PushRequest) -> Result<ImageInfo, Error> {
     let _exports = ensure_config_only()?;
+
+    if request.sign {
+        with_session(|shared| {
+            let _signing = crate::notary::validate_signing_config(
+                shared.config.signing_key.as_deref(),
+                &shared.config.signing_cert_chain,
+            )?;
+            Ok(())
+        })?;
+    }
+
     rpc(
         HostFrame::Push(rob_proto::Push {
             image: request.image.clone(),

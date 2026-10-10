@@ -272,6 +272,8 @@ impl Cli {
             auth_file: self.auth_file.clone(),
             insecure: self.insecure,
             log_level: self.log_level.into(),
+            signing_key: None,
+            signing_cert_chain: Vec::new(),
         }
     }
 }

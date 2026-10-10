@@ -219,6 +219,8 @@ fn config_from_init(init: &Init) -> Result<Config, Error> {
                 ));
             }
         },
+        signing_key: None,
+        signing_cert_chain: Vec::new(),
     })
 }
 

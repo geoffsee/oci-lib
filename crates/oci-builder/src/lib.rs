@@ -49,6 +49,7 @@ mod guest_record;
 mod ignore;
 #[cfg(rob_vm)]
 mod macos;
+mod notary;
 mod policy;
 #[cfg(any(rob_vm, test))]
 mod shares;
