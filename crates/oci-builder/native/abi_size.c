@@ -69,6 +69,8 @@ int main(void) {
 	FIELD(rob_build_request, no_cache, "ROB_BUILD_OFF_NO_CACHE");
 	FIELD(rob_build_request, squash, "ROB_BUILD_OFF_SQUASH");
 	FIELD(rob_build_request, quiet, "ROB_BUILD_OFF_QUIET");
+	FIELD(rob_build_request, excludes, "ROB_BUILD_OFF_EXCLUDES");
+	FIELD(rob_build_request, exclude_count, "ROB_BUILD_OFF_EXCLUDE_COUNT");
 
 	printf("pub const ROB_PUSH_REQUEST_SIZE: usize = %zu;\n", sizeof(rob_push_request));
 	printf("pub const ROB_PUSH_REQUEST_ALIGN: usize = %zu;\n", _Alignof(rob_push_request));

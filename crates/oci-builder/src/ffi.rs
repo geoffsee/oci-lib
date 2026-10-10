@@ -69,6 +69,8 @@ pub(crate) struct RobBuildRequest {
     pub no_cache: i32,
     pub squash: i32,
     pub quiet: i32,
+    pub excludes: *const *const c_char,
+    pub exclude_count: usize,
 }
 
 #[repr(C)]
@@ -256,6 +258,14 @@ mod tests {
         );
         assert_eq!(offset_of!(RobBuildRequest, squash), ROB_BUILD_OFF_SQUASH);
         assert_eq!(offset_of!(RobBuildRequest, quiet), ROB_BUILD_OFF_QUIET);
+        assert_eq!(
+            offset_of!(RobBuildRequest, excludes),
+            ROB_BUILD_OFF_EXCLUDES
+        );
+        assert_eq!(
+            offset_of!(RobBuildRequest, exclude_count),
+            ROB_BUILD_OFF_EXCLUDE_COUNT
+        );
 
         assert_eq!(size_of::<RobPushRequest>(), ROB_PUSH_REQUEST_SIZE);
         assert_eq!(align_of::<RobPushRequest>(), ROB_PUSH_REQUEST_ALIGN);

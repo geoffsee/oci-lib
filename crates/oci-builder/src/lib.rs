@@ -44,8 +44,10 @@ mod config;
 mod entitlement;
 mod error;
 mod ffi;
+mod ignore;
 #[cfg(rob_vm)]
 mod macos;
+mod policy;
 #[cfg(any(rob_vm, test))]
 mod shares;
 

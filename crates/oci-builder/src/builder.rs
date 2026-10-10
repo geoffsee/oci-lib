@@ -8,7 +8,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::config::{Config, ImageFormat, Isolation, PullPolicy, StorageDriver};
+use crate::config::{Config, EngineHost, ImageFormat, Isolation, PullPolicy, StorageDriver};
 use crate::error::{Error, ErrorCode, Result, read_buf};
 #[cfg_attr(rob_vm, allow(unused_imports))]
 use crate::ffi::{
@@ -156,6 +156,33 @@ pub struct BuildRequest {
     pub squash: bool,
     /// Suppress verbose progress output during the build.
     pub quiet: bool,
+    /// Extra dockerignore patterns, appended after the selected ignore file.
+    ///
+    /// Empty means no extra patterns. The file is chosen the way Buildah
+    /// v1.45.1 `parse.ContainerIgnoreFile` chooses it, and these patterns do
+    /// not replace that file:
+    ///
+    /// - A Dockerfile-specific ignore beside the Dockerfile is chosen before
+    ///   context-root files.
+    /// - If both `<Dockerfile>.containerignore` and `<Dockerfile>.dockerignore`
+    ///   exist, `.dockerignore` wins (Buildah checks it last).
+    /// - Otherwise the context-root `.containerignore` is used when it is
+    ///   present, else the context-root `.dockerignore`. The two root files
+    ///   are not merged.
+    ///
+    /// Syntax is Docker's dockerignore. Blank lines and `#` comments are
+    /// ignored, `!` negates, the last match wins, and `**` matches across
+    /// directories. A pattern `.env*` does not exclude `nested/.env.synthetic`.
+    /// Callers who want every path component named `.env*` pass `**/.env*`
+    /// or an equivalent entry here.
+    ///
+    /// The selected file's patterns plus these entries are passed to Buildah
+    /// so `COPY` and `ADD` honor them. On macOS the same rules filter the
+    /// directory exported to the guest, so excluded paths never appear on
+    /// the virtiofs share. The Dockerfile is always staged even if a pattern
+    /// names it. Ignore files themselves may be omitted from the guest. On
+    /// Linux there is no guest share; the patterns are still passed through.
+    pub excludes: Vec<String>,
     /// Optional cancellation token to stop the build in-flight.
     pub cancel: Option<CancelToken>,
     /// Optional callback invoked for each line of progress and log output.
@@ -181,6 +208,7 @@ impl Default for BuildRequest {
             no_cache: false,
             squash: false,
             quiet: false,
+            excludes: Vec::new(),
             cancel: None,
             on_log: None,
         }
@@ -206,6 +234,7 @@ impl std::fmt::Debug for BuildRequest {
             .field("no_cache", &self.no_cache)
             .field("squash", &self.squash)
             .field("quiet", &self.quiet)
+            .field("excludes", &self.excludes)
             .field("cancel", &self.cancel)
             .finish_non_exhaustive()
     }
@@ -259,9 +288,11 @@ impl BuildRequest {
                 "",
             ));
         }
+        let excludes = crate::ignore::collect_excludes(&context_dir, &dockerfile, &self.excludes)?;
         Ok(PreparedPaths {
             dockerfile,
             context_dir,
+            excludes,
         })
     }
 }
@@ -270,6 +301,7 @@ impl BuildRequest {
 pub(crate) struct PreparedPaths {
     pub(crate) dockerfile: PathBuf,
     pub(crate) context_dir: PathBuf,
+    pub(crate) excludes: Vec<String>,
 }
 
 /// Push one local image.
@@ -527,7 +559,7 @@ fn execute_build(request: &BuildRequest, paths: &PreparedPaths) -> Result<ImageI
     let context_dir = cstring_path(&paths.context_dir)?;
     let tag = opt_cstring(request.tag.as_deref().unwrap_or(""))?;
     let target = opt_cstring(request.target.as_deref().unwrap_or(""))?;
-    let isolation = opt_cstring(request.isolation.as_abi())?;
+    let isolation = opt_cstring(request.isolation.for_engine(EngineHost::Linux)?)?;
     let format = opt_cstring(request.format.as_abi())?;
     let pull = opt_cstring(request.pull.as_abi())?;
     let os_name = opt_cstring(request.os.as_deref().unwrap_or(""))?;
@@ -536,6 +568,7 @@ fn execute_build(request: &BuildRequest, paths: &PreparedPaths) -> Result<ImageI
     let arg_keys = CStringList::from_strings(request.build_args.keys().map(String::as_str))?;
     let arg_vals = CStringList::from_strings(request.build_args.values().map(String::as_str))?;
     let labels = CStringList::from_strings(request.labels.iter().map(|(k, v)| format!("{k}={v}")))?;
+    let excludes = CStringList::from_strings(paths.excludes.iter().map(String::as_str))?;
     let slot = request
         .on_log
         .clone()
@@ -571,6 +604,8 @@ fn execute_build(request: &BuildRequest, paths: &PreparedPaths) -> Result<ImageI
         no_cache: i32::from(request.no_cache),
         squash: i32::from(request.squash),
         quiet: i32::from(request.quiet),
+        excludes: excludes.as_ptr(),
+        exclude_count: excludes.len(),
     };
     unsafe {
         let mut out = RobResult::zero();
@@ -649,7 +684,8 @@ impl HeldConfig {
                 .unwrap_or(""),
         )?;
         let registries_conf = hold_path(&mut owned, config.registries_conf.as_deref())?;
-        let signature_policy = hold_path(&mut owned, config.signature_policy.as_deref())?;
+        let policy = crate::policy::effective_signature_policy(config.signature_policy.as_deref())?;
+        let signature_policy = hold_path(&mut owned, policy.as_deref())?;
         let auth_file = hold_path(&mut owned, config.auth_file.as_deref())?;
         let log_level = hold_str(&mut owned, config.log_level.as_abi())?;
         let opts = CStringList::from_strings(config.storage_opts.iter().map(String::as_str))?;

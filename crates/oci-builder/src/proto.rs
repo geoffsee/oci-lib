@@ -116,6 +116,9 @@ pub struct Build {
     pub quiet: bool,
     /// `0` means the build cannot be cancelled.
     pub cancel_token: u64,
+    /// Dockerignore patterns already combined from the ignore file and
+    /// `BuildRequest.excludes`. Empty lets Buildah read an ignore file itself.
+    pub excludes: Vec<String>,
 }
 
 /// One registry push. An empty `format` keeps the source manifest type.
@@ -253,6 +256,7 @@ fn encode_host(frame: &HostFrame) -> Vec<u8> {
             w.bool(build.squash);
             w.bool(build.quiet);
             w.u64(build.cancel_token);
+            w.strs(&build.excludes);
         }
         HostFrame::Tag { image, new_name } => {
             w.u8(HOST_TAG);
@@ -343,6 +347,7 @@ fn decode_host(body: &[u8]) -> io::Result<HostFrame> {
             squash: r.bool()?,
             quiet: r.bool()?,
             cancel_token: r.u64()?,
+            excludes: r.strs()?,
         }),
         HOST_TAG => HostFrame::Tag {
             image: r.str()?,
@@ -596,6 +601,7 @@ mod tests {
             squash: true,
             quiet: false,
             cancel_token: 7,
+            excludes: vec!["secret".into(), "**/.env*".into()],
         }));
         roundtrip_host(HostFrame::Tag {
             image: "a".into(),
