@@ -37,7 +37,7 @@ use objc2_virtualization::{
 };
 
 use crate::builder::{BuildRequest, CancelToken, ImageInfo, LogRecord, LogStream, PreparedPaths};
-use crate::config::{Config, ImageFormat, StorageDriver};
+use crate::config::{Config, EngineHost, ImageFormat, StorageDriver};
 use crate::error::{Error, ErrorCode};
 use crate::shares::{Export, ShareRequest, guest_path, plan_shares};
 
@@ -76,13 +76,18 @@ struct Guest {
 
 static SESSION: Mutex<Option<Shared>> = Mutex::new(None);
 
-pub(crate) fn open(config: Config) -> Result<(), Error> {
+pub(crate) fn open(mut config: Config) -> Result<(), Error> {
     if !virtualization_supported() {
         return Err(fail(
             ErrorCode::Prerequisite,
             "Apple Virtualization.framework is not available on this Mac",
         ));
     }
+    if !crate::entitlement::present() {
+        return Err(crate::entitlement::missing());
+    }
+    config.signature_policy =
+        crate::policy::effective_signature_policy(config.signature_policy.as_deref())?;
     let (kernel, initrd) = locate_artifacts()?;
     let mut slot = SESSION.lock().unwrap_or_else(|poison| poison.into_inner());
     if slot.is_some() {
@@ -118,11 +123,15 @@ pub(crate) fn open(config: Config) -> Result<(), Error> {
 }
 
 pub(crate) fn build(request: &BuildRequest, paths: &PreparedPaths) -> Result<ImageInfo, Error> {
+    // Reject OCI isolation before any virtiofs device is created. The guest
+    // has no runc or crun; chroot is the supported isolation.
+    let isolation = request.isolation.for_engine(EngineHost::MacosGuest)?;
+    let staged = stage_build_context(paths)?;
     let exports = with_session(|shared| {
         prepare_dirs(&shared.config)?;
         let planned = plan_shares(ShareRequest {
-            context: Some(&paths.context_dir),
-            dockerfile: Some(&paths.dockerfile),
+            context: Some(&staged.context_dir),
+            dockerfile: Some(&staged.dockerfile),
             storage_root: shared.config.storage_root.as_deref(),
             run_root: shared.config.run_root.as_deref(),
             signature_policy: shared.config.signature_policy.as_deref(),
@@ -133,11 +142,11 @@ pub(crate) fn build(request: &BuildRequest, paths: &PreparedPaths) -> Result<Ima
         call_ensure(shared, planned)
     })?;
     let frame = HostFrame::Build(rob_proto::Build {
-        dockerfile: map_path(&paths.dockerfile, &exports)?,
-        context_dir: map_path(&paths.context_dir, &exports)?,
+        dockerfile: map_path(&staged.dockerfile, &exports)?,
+        context_dir: map_path(&staged.context_dir, &exports)?,
         tag: request.tag.clone().unwrap_or_default(),
         target: request.target.clone().unwrap_or_default(),
-        isolation: request.isolation.as_abi().to_string(),
+        isolation: isolation.to_string(),
         format: request.format.as_abi().to_string(),
         pull: request.pull.as_abi().to_string(),
         os: request.os.clone().unwrap_or_default(),
@@ -162,6 +171,7 @@ pub(crate) fn build(request: &BuildRequest, paths: &PreparedPaths) -> Result<Ima
             .as_ref()
             .map(CancelToken::raw_id)
             .unwrap_or(0),
+        excludes: staged.excludes,
     });
     rpc(frame, request.on_log.clone())
 }
@@ -181,7 +191,18 @@ pub(crate) fn tag(image: &str, new_name: &str) -> Result<(), Error> {
 
 pub(crate) fn push(request: &crate::builder::PushRequest) -> Result<ImageInfo, Error> {
     let _exports = ensure_config_only()?;
-    rpc(
+
+    if request.sign {
+        with_session(|shared| {
+            let _signing = crate::notary::validate_signing_config(
+                shared.config.signing_key.as_deref(),
+                &shared.config.signing_cert_chain,
+            )?;
+            Ok(())
+        })?;
+    }
+
+    let info = rpc(
         HostFrame::Push(rob_proto::Push {
             image: request.image.clone(),
             destination: request.destination.clone(),
@@ -200,7 +221,30 @@ pub(crate) fn push(request: &crate::builder::PushRequest) -> Result<ImageInfo, E
                 .unwrap_or(0),
         }),
         request.on_log.clone(),
-    )
+    )?;
+    if request.sign {
+        with_session(|shared| {
+            let material = crate::notary::validate_signing_config(
+                shared.config.signing_key.as_deref(),
+                &shared.config.signing_cert_chain,
+            )?
+            .ok_or_else(|| {
+                fail(
+                    ErrorCode::InvalidArgument,
+                    "signature requested but no signing key is configured",
+                )
+            })?;
+            let registry = crate::registry::Registry::parse(
+                &request.destination,
+                &request.username,
+                &request.password,
+                request.insecure || shared.config.insecure,
+            )?;
+            registry.sign_push(&material)?;
+            Ok(())
+        })?;
+    }
+    Ok(info)
 }
 
 pub(crate) fn shutdown() -> Result<(), Error> {
@@ -231,12 +275,21 @@ pub(crate) fn diagnose() -> Result<String, Error> {
         lines
             .push("[fail] Apple Virtualization.framework is not available on this Mac".to_string());
     }
+    if crate::entitlement::present() {
+        lines.push("[ok] com.apple.security.virtualization entitlement".to_string());
+    } else {
+        blocked = true;
+        let err = crate::entitlement::missing();
+        lines.push(format!("[fail] {}", err.message()));
+        lines.push(err.detail().to_string());
+    }
     match locate_artifacts() {
         Ok((kernel, initrd)) => {
-            let embedded = kernel.starts_with(guest_cache_dir());
-            let source = if embedded { "embedded guest" } else { "guest" };
-            lines.push(format!("[ok] {source} kernel {}", kernel.display()));
-            lines.push(format!("[ok] {source} initramfs {}", initrd.display()));
+            lines.push(format!("[ok] embedded guest kernel {}", kernel.display()));
+            lines.push(format!(
+                "[ok] embedded guest initramfs {}",
+                initrd.display()
+            ));
         }
         Err(err) => {
             blocked = true;
@@ -246,6 +299,9 @@ pub(crate) fn diagnose() -> Result<String, Error> {
             }
         }
     }
+    lines.extend(crate::guest_record::lines_from_attestation(
+        EMBEDDED_ATTESTATION,
+    ));
     let status = if blocked { "blocked" } else { "ready" };
     let mut report = format!("status: {status}\n");
     report.push_str(&lines.join("\n"));
@@ -501,6 +557,98 @@ fn map_optional(path: Option<&Path>, exports: &[Export]) -> Result<String, Error
 
 fn map_path(path: &Path, exports: &[Export]) -> Result<String, Error> {
     guest_path(path, exports).map_err(|err| fail(ErrorCode::InvalidArgument, err))
+}
+
+/// Filtered copy of the build context. The same directory is reused for a
+/// given host context so a later build still sits inside the share the
+/// running guest already has. Children are replaced; the directory inode stays.
+fn stage_build_context(paths: &PreparedPaths) -> Result<PreparedPaths, Error> {
+    let root = std::env::temp_dir().join(format!("oci-builder-context-{}", std::process::id()));
+    std::fs::create_dir_all(&root).map_err(|err| {
+        fail(
+            ErrorCode::Internal,
+            format!("creating context stage root: {err}"),
+        )
+    })?;
+    let dest = root.join(stage_key(&paths.context_dir));
+    if dest.exists() {
+        clear_children(&dest)?;
+    }
+    std::fs::create_dir_all(&dest).map_err(|err| {
+        fail(
+            ErrorCode::Internal,
+            format!("creating staged context: {err}"),
+        )
+    })?;
+    crate::ignore::stage_context(
+        &paths.context_dir,
+        &paths.dockerfile,
+        &paths.excludes,
+        &dest,
+    )?;
+    let rel = paths
+        .dockerfile
+        .strip_prefix(&paths.context_dir)
+        .map_err(|_| {
+            fail(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "dockerfile {} is outside the build context {}",
+                    paths.dockerfile.display(),
+                    paths.context_dir.display()
+                ),
+            )
+        })?;
+    Ok(PreparedPaths {
+        dockerfile: dest.join(rel),
+        context_dir: dest,
+        excludes: paths.excludes.clone(),
+    })
+}
+
+fn stage_key(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in path.as_os_str().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn clear_children(dir: &Path) -> Result<(), Error> {
+    for entry in std::fs::read_dir(dir).map_err(|err| {
+        fail(
+            ErrorCode::Internal,
+            format!("reading staged context: {err}"),
+        )
+    })? {
+        let entry = entry.map_err(|err| {
+            fail(
+                ErrorCode::Internal,
+                format!("reading staged context: {err}"),
+            )
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|err| {
+            fail(
+                ErrorCode::Internal,
+                format!("reading staged context: {err}"),
+            )
+        })?;
+        let result = if file_type.is_symlink() || file_type.is_file() {
+            std::fs::remove_file(&path)
+        } else {
+            std::fs::remove_dir_all(&path)
+        };
+        result.map_err(|err| {
+            fail(
+                ErrorCode::Internal,
+                format!("clearing staged context: {err}"),
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn exchange(
@@ -783,7 +931,7 @@ fn vm_config(
             objc2_virtualization::VZSharedDirectory::initWithURL_readOnly(
                 objc2_virtualization::VZSharedDirectory::alloc(),
                 &host_url,
-                false,
+                export.read_only,
             )
         };
         let share = unsafe {
@@ -932,59 +1080,15 @@ fn ns_error_text(err: &NSError) -> String {
     err.localizedDescription().to_string()
 }
 
-const EMBEDDED_KERNEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rob-guest-vmlinuz"));
-const EMBEDDED_INITRD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rob-guest-initramfs"));
+const EMBEDDED_KERNEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rob-guest-vmlinuz.zst"));
+const EMBEDDED_INITRD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rob-guest-initramfs.zst"));
+const EMBEDDED_ATTESTATION: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/rob-guest-attestation.json"));
 
+/// The guest always boots from the images embedded at build time. They are
+/// written to the cache directory because the boot loader takes file URLs.
 fn locate_artifacts() -> Result<(PathBuf, PathBuf), Error> {
-    match (env::var("ROB_GUEST_KERNEL"), env::var("ROB_GUEST_INITRD")) {
-        (Ok(kernel), Ok(initrd)) => {
-            return require_pair(PathBuf::from(kernel), PathBuf::from(initrd));
-        }
-        (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
-            return Err(fail(
-                ErrorCode::Prerequisite,
-                "set both ROB_GUEST_KERNEL and ROB_GUEST_INITRD",
-            ));
-        }
-        (Err(_), Err(_)) => {}
-    }
-    if !EMBEDDED_KERNEL.is_empty() && !EMBEDDED_INITRD.is_empty() {
-        return materialize_embedded();
-    }
-    let mut tried = Vec::new();
-    let mut candidates = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("guest/out")];
-    if let Ok(cwd) = env::current_dir() {
-        let mut dir = cwd;
-        for _ in 0..6 {
-            candidates.push(dir.join("guest/out"));
-            if !dir.pop() {
-                break;
-            }
-        }
-    }
-    if let Ok(exe) = env::current_exe() {
-        let mut dir = exe;
-        for _ in 0..8 {
-            if !dir.pop() {
-                break;
-            }
-            candidates.push(dir.join("guest/out"));
-        }
-    }
-    for candidate in candidates {
-        tried.push(candidate.display().to_string());
-        if let Ok(pair) = require_pair(candidate.join("vmlinuz"), candidate.join("initramfs")) {
-            return Ok(pair);
-        }
-    }
-    Err(Error::new(
-        ErrorCode::Prerequisite,
-        "Linux guest kernel and initramfs were not found",
-        format!(
-            "looked for guest/out under {}. Rebuild with guest/out present to embed the images, or set ROB_GUEST_KERNEL and ROB_GUEST_INITRD.",
-            tried.join(", ")
-        ),
-    ))
+    materialize_embedded()
 }
 
 fn materialize_embedded() -> Result<(PathBuf, PathBuf), Error> {
@@ -995,9 +1099,18 @@ fn materialize_embedded() -> Result<(PathBuf, PathBuf), Error> {
     ));
     let kernel = dir.join("vmlinuz");
     let initrd = dir.join("initramfs");
-    write_embedded(&kernel, EMBEDDED_KERNEL)?;
-    write_embedded(&initrd, EMBEDDED_INITRD)?;
+    write_embedded(&kernel, &decompress(EMBEDDED_KERNEL)?)?;
+    write_embedded(&initrd, &decompress(EMBEDDED_INITRD)?)?;
     Ok((kernel, initrd))
+}
+
+fn decompress(bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    zstd::decode_all(bytes).map_err(|err| {
+        fail(
+            ErrorCode::Internal,
+            format!("decompressing the embedded guest: {err}"),
+        )
+    })
 }
 
 fn guest_cache_dir() -> PathBuf {
@@ -1036,21 +1149,6 @@ fn write_embedded(path: &Path, bytes: &[u8]) -> Result<(), Error> {
             format!("renaming {} to {}: {err}", tmp.display(), path.display()),
         )
     })
-}
-
-fn require_pair(kernel: PathBuf, initrd: PathBuf) -> Result<(PathBuf, PathBuf), Error> {
-    if kernel.is_file() && initrd.is_file() {
-        Ok((kernel, initrd))
-    } else {
-        Err(fail(
-            ErrorCode::Prerequisite,
-            format!(
-                "missing guest kernel {} or initramfs {}",
-                kernel.display(),
-                initrd.display()
-            ),
-        ))
-    }
 }
 
 fn io_err(err: io::Error) -> Error {

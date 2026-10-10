@@ -17,11 +17,19 @@ pub(crate) fn startup() -> Result<(), Error> {
 }
 
 pub(crate) fn diagnose() -> Result<String, Error> {
-    Err(Error::new(
-        crate::error::ErrorCode::Unsupported,
-        "oci-runner is available on Linux and macOS only",
-        "",
-    ))
+    Err(unsupported())
+}
+
+/// The stub's error, which says why this build has no engine.
+pub(crate) fn unsupported() -> Error {
+    match startup() {
+        Err(err) => err,
+        Ok(()) => Error::new(
+            crate::error::ErrorCode::Unsupported,
+            "oci-runner is available on Linux and macOS only",
+            "",
+        ),
+    }
 }
 
 unsafe fn read_buf(buf: &ffi::RorBuffer) -> String {

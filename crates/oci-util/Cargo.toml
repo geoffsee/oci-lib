@@ -1,0 +1,30 @@
+[package]
+name = "oci-util"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Shared OCI utility and signature helpers"
+readme = "README.md"
+
+[lib]
+name = "oci_util"
+path = "src/lib.rs"
+
+[dependencies]
+base64 = "0.23.1"
+ciborium = "0.2.2"
+p256 = { version = "0.14.0", features = ["ecdsa", "pkcs8"] }
+p384 = { version = "0.14.0", features = ["ecdsa", "pkcs8"] }
+p521 = { version = "0.14.0", features = ["ecdsa", "pkcs8"] }
+rsa = { version = "0.9.10", features = ["getrandom", "sha2"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = { version = "0.10", features = ["oid"] }
+x509-parser = "0.18.1"
+
+[dev-dependencies]
+rcgen = "0.13"
+time = "0.3"

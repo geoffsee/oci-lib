@@ -80,6 +80,9 @@ pub(crate) fn open() -> Result<(), Error> {
             "Apple Virtualization.framework is not available on this Mac",
         ));
     }
+    if !crate::entitlement::present() {
+        return Err(crate::entitlement::missing());
+    }
     let (kernel, initrd) = locate_artifacts()?;
     let mut slot = SESSION.lock().unwrap_or_else(|poison| poison.into_inner());
     if slot.is_some() {
@@ -143,6 +146,14 @@ pub(crate) fn diagnose() -> Result<String, Error> {
         lines
             .push("[fail] Apple Virtualization.framework is not available on this Mac".to_string());
     }
+    if crate::entitlement::present() {
+        lines.push("[ok] com.apple.security.virtualization entitlement".to_string());
+    } else {
+        blocked = true;
+        let err = crate::entitlement::missing();
+        lines.push(format!("[fail] {}", err.message()));
+        lines.push(err.detail().to_string());
+    }
     match locate_artifacts() {
         Ok((kernel, initrd)) => {
             lines.push(format!("[ok] guest kernel {}", kernel.display()));
@@ -156,6 +167,9 @@ pub(crate) fn diagnose() -> Result<String, Error> {
             }
         }
     }
+    lines.extend(crate::guest_record::lines_from_attestation(
+        EMBEDDED_ATTESTATION,
+    ));
     let status = if blocked { "blocked" } else { "ready" };
     let mut report = format!("status: {status}\n");
     report.push_str(&lines.join("\n"));
@@ -677,59 +691,15 @@ fn ns_error_text(err: &NSError) -> String {
     err.localizedDescription().to_string()
 }
 
-const EMBEDDED_KERNEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ror-guest-vmlinuz"));
-const EMBEDDED_INITRD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ror-guest-initramfs"));
+const EMBEDDED_KERNEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ror-guest-vmlinuz.zst"));
+const EMBEDDED_INITRD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ror-guest-initramfs.zst"));
+const EMBEDDED_ATTESTATION: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/ror-guest-attestation.json"));
 
+/// The guest always boots from the images embedded at build time. They are
+/// written to the cache directory because the boot loader takes file URLs.
 fn locate_artifacts() -> Result<(PathBuf, PathBuf), Error> {
-    match (env::var("ROR_GUEST_KERNEL"), env::var("ROR_GUEST_INITRD")) {
-        (Ok(kernel), Ok(initrd)) => {
-            return require_pair(PathBuf::from(kernel), PathBuf::from(initrd));
-        }
-        (Ok(_), Err(_)) | (Err(_), Ok(_)) => {
-            return Err(fail(
-                ErrorCode::Prerequisite,
-                "set both ROR_GUEST_KERNEL and ROR_GUEST_INITRD",
-            ));
-        }
-        (Err(_), Err(_)) => {}
-    }
-    if !EMBEDDED_KERNEL.is_empty() && !EMBEDDED_INITRD.is_empty() {
-        return materialize_embedded();
-    }
-    let mut tried = Vec::new();
-    let mut candidates = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("guest/out")];
-    if let Ok(cwd) = env::current_dir() {
-        let mut dir = cwd;
-        for _ in 0..6 {
-            candidates.push(dir.join("guest/out"));
-            if !dir.pop() {
-                break;
-            }
-        }
-    }
-    if let Ok(exe) = env::current_exe() {
-        let mut dir = exe;
-        for _ in 0..8 {
-            if !dir.pop() {
-                break;
-            }
-            candidates.push(dir.join("guest/out"));
-        }
-    }
-    for candidate in candidates {
-        tried.push(candidate.display().to_string());
-        if let Ok(pair) = require_pair(candidate.join("vmlinuz"), candidate.join("initramfs")) {
-            return Ok(pair);
-        }
-    }
-    Err(Error::new(
-        ErrorCode::Prerequisite,
-        "Linux guest kernel and initramfs were not found",
-        format!(
-            "looked for guest/out under {}. Rebuild with guest/out present to embed the images, or set ROR_GUEST_KERNEL and ROR_GUEST_INITRD.",
-            tried.join(", ")
-        ),
-    ))
+    materialize_embedded()
 }
 
 fn materialize_embedded() -> Result<(PathBuf, PathBuf), Error> {
@@ -740,9 +710,18 @@ fn materialize_embedded() -> Result<(PathBuf, PathBuf), Error> {
     ));
     let kernel = dir.join("vmlinuz");
     let initrd = dir.join("initramfs");
-    write_embedded(&kernel, EMBEDDED_KERNEL)?;
-    write_embedded(&initrd, EMBEDDED_INITRD)?;
+    write_embedded(&kernel, &decompress(EMBEDDED_KERNEL)?)?;
+    write_embedded(&initrd, &decompress(EMBEDDED_INITRD)?)?;
     Ok((kernel, initrd))
+}
+
+fn decompress(bytes: &[u8]) -> Result<Vec<u8>, Error> {
+    zstd::decode_all(bytes).map_err(|err| {
+        fail(
+            ErrorCode::Internal,
+            format!("decompressing the embedded guest: {err}"),
+        )
+    })
 }
 
 fn guest_cache_dir() -> PathBuf {
@@ -780,21 +759,6 @@ fn write_embedded(path: &Path, bytes: &[u8]) -> Result<(), Error> {
             format!("renaming {} to {}: {err}", tmp.display(), path.display()),
         )
     })
-}
-
-fn require_pair(kernel: PathBuf, initrd: PathBuf) -> Result<(PathBuf, PathBuf), Error> {
-    if kernel.is_file() && initrd.is_file() {
-        Ok((kernel, initrd))
-    } else {
-        Err(fail(
-            ErrorCode::Prerequisite,
-            format!(
-                "missing guest kernel {} or initramfs {}",
-                kernel.display(),
-                initrd.display()
-            ),
-        ))
-    }
 }
 
 fn io_err(err: io::Error) -> Error {

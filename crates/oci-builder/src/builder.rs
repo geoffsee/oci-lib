@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#![cfg_attr(target_os = "macos", allow(dead_code))]
+#![cfg_attr(rob_vm, allow(dead_code))]
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -8,9 +8,9 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::config::{Config, ImageFormat, Isolation, PullPolicy, StorageDriver};
+use crate::config::{Config, EngineHost, ImageFormat, Isolation, PullPolicy, StorageDriver};
 use crate::error::{Error, ErrorCode, Result, read_buf};
-#[cfg_attr(target_os = "macos", allow(unused_imports))]
+#[cfg_attr(rob_vm, allow(unused_imports))]
 use crate::ffi::{
     self, RobBuffer, RobBuildRequest, RobConfig, RobError, RobPushRequest, RobResult,
 };
@@ -98,15 +98,15 @@ impl CancelToken {
 
     /// Signal cancellation to any build or push using this token.
     pub fn cancel(&self) {
-        #[cfg(target_os = "macos")]
+        #[cfg(rob_vm)]
         crate::macos::cancel(self.inner.id);
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         unsafe {
             ffi::rob_cancel(self.inner.id)
         }
     }
 
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    #[cfg_attr(not(rob_vm), allow(dead_code))]
     pub(crate) fn raw_id(&self) -> u64 {
         self.inner.id
     }
@@ -156,6 +156,33 @@ pub struct BuildRequest {
     pub squash: bool,
     /// Suppress verbose progress output during the build.
     pub quiet: bool,
+    /// Extra dockerignore patterns, appended after the selected ignore file.
+    ///
+    /// Empty means no extra patterns. The file is chosen the way Buildah
+    /// v1.45.1 `parse.ContainerIgnoreFile` chooses it, and these patterns do
+    /// not replace that file:
+    ///
+    /// - A Dockerfile-specific ignore beside the Dockerfile is chosen before
+    ///   context-root files.
+    /// - If both `<Dockerfile>.containerignore` and `<Dockerfile>.dockerignore`
+    ///   exist, `.dockerignore` wins (Buildah checks it last).
+    /// - Otherwise the context-root `.containerignore` is used when it is
+    ///   present, else the context-root `.dockerignore`. The two root files
+    ///   are not merged.
+    ///
+    /// Syntax is Docker's dockerignore. Blank lines and `#` comments are
+    /// ignored, `!` negates, the last match wins, and `**` matches across
+    /// directories. A pattern `.env*` does not exclude `nested/.env.synthetic`.
+    /// Callers who want every path component named `.env*` pass `**/.env*`
+    /// or an equivalent entry here.
+    ///
+    /// The selected file's patterns plus these entries are passed to Buildah
+    /// so `COPY` and `ADD` honor them. On macOS the same rules filter the
+    /// directory exported to the guest, so excluded paths never appear on
+    /// the virtiofs share. The Dockerfile is always staged even if a pattern
+    /// names it. Ignore files themselves may be omitted from the guest. On
+    /// Linux there is no guest share; the patterns are still passed through.
+    pub excludes: Vec<String>,
     /// Optional cancellation token to stop the build in-flight.
     pub cancel: Option<CancelToken>,
     /// Optional callback invoked for each line of progress and log output.
@@ -181,6 +208,7 @@ impl Default for BuildRequest {
             no_cache: false,
             squash: false,
             quiet: false,
+            excludes: Vec::new(),
             cancel: None,
             on_log: None,
         }
@@ -206,6 +234,7 @@ impl std::fmt::Debug for BuildRequest {
             .field("no_cache", &self.no_cache)
             .field("squash", &self.squash)
             .field("quiet", &self.quiet)
+            .field("excludes", &self.excludes)
             .field("cancel", &self.cancel)
             .finish_non_exhaustive()
     }
@@ -259,9 +288,11 @@ impl BuildRequest {
                 "",
             ));
         }
+        let excludes = crate::ignore::collect_excludes(&context_dir, &dockerfile, &self.excludes)?;
         Ok(PreparedPaths {
             dockerfile,
             context_dir,
+            excludes,
         })
     }
 }
@@ -270,6 +301,7 @@ impl BuildRequest {
 pub(crate) struct PreparedPaths {
     pub(crate) dockerfile: PathBuf,
     pub(crate) context_dir: PathBuf,
+    pub(crate) excludes: Vec<String>,
 }
 
 /// Push one local image.
@@ -293,6 +325,8 @@ pub struct PushRequest {
     pub cancel: Option<CancelToken>,
     /// Optional callback to receive streaming push log records.
     pub on_log: Option<Arc<dyn Fn(LogRecord) + Send + Sync>>,
+    /// Sign the pushed image if a signing key is configured.
+    pub sign: bool,
 }
 
 impl PushRequest {
@@ -307,6 +341,7 @@ impl PushRequest {
             insecure: false,
             cancel: None,
             on_log: None,
+            sign: false,
         }
     }
 
@@ -316,6 +351,12 @@ impl PushRequest {
         F: Fn(LogRecord) + Send + Sync + 'static,
     {
         self.on_log = Some(Arc::new(callback));
+        self
+    }
+
+    /// Sign the pushed image if a key is configured.
+    pub fn with_signature(mut self) -> Self {
+        self.sign = true;
         self
     }
 }
@@ -342,39 +383,143 @@ impl std::fmt::Debug for PushRequest {
 #[derive(Debug)]
 pub struct Builder {
     _private: (),
+    config: Config,
 }
 
 impl Builder {
     /// Initialize and open the process-wide Buildah store with the given configuration.
     pub fn open(config: Config) -> Result<Self> {
         startup()?;
-        #[cfg(target_os = "macos")]
+        #[cfg(rob_vm)]
+        let retained_config = config.clone();
+        #[cfg(rob_vm)]
         {
             crate::macos::open(config)?;
-            Ok(Builder { _private: () })
+            Ok(Builder {
+                _private: (),
+                config: retained_config,
+            })
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         let held = HeldConfig::from_config(&config)?;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         with_op(|| unsafe {
             let mut err = RobError::zero();
             let code = ffi::rob_init(&held.raw, &mut err);
             let result = take_status(code, &err);
             ffi::rob_error_free(&mut err);
-            result.map(|()| Builder { _private: () })
+            result.map(|()| Builder {
+                _private: (),
+                config: config.clone(),
+            })
         })
     }
 
     /// Build an OCI or Docker image according to the specified request.
     pub fn build(&self, request: BuildRequest) -> Result<ImageInfo> {
         let _ = self;
+        self.verify_pull_references(&request)?;
         let paths = request.prepare()?;
-        #[cfg(target_os = "macos")]
+        #[cfg(rob_vm)]
         {
             crate::macos::build(&request, &paths)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         with_op(|| execute_build(&request, &paths))
+    }
+
+    /// Verify OCI Notary referrers for all remote `FROM` images in a build.
+    ///
+    /// Verification is enabled when [`Config::trust_policy`] is set. The
+    /// check runs before Buildah starts pulling a base image, so a missing or
+    /// invalid signature stops the build before untrusted bytes enter storage.
+    pub fn verify_image(
+        &self,
+        reference: &str,
+        username: &str,
+        password: &str,
+        insecure: bool,
+    ) -> Result<()> {
+        let Some(policy_path) = &self.config.trust_policy else {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "no Notary trust policy is configured",
+                "set Config.trust_policy before calling verify_image",
+            ));
+        };
+        let policy_bytes = std::fs::read(policy_path).map_err(|err| {
+            Error::new(
+                ErrorCode::InvalidArgument,
+                "cannot read Notary trust policy",
+                err.to_string(),
+            )
+        })?;
+        let policy =
+            oci_util::signature::TrustPolicyDocument::from_bytes(&policy_bytes).map_err(|err| {
+                Error::new(
+                    ErrorCode::InvalidArgument,
+                    "invalid Notary trust policy",
+                    err.to_string(),
+                )
+            })?;
+        let mut anchors = BTreeMap::new();
+        for (store, paths) in &self.config.trust_anchors {
+            let mut certs = Vec::with_capacity(paths.len());
+            for path in paths {
+                certs.push(std::fs::read(path).map_err(|err| {
+                    Error::new(
+                        ErrorCode::InvalidArgument,
+                        "cannot read Notary trust anchor",
+                        format!("{}: {err}", path.display()),
+                    )
+                })?);
+            }
+            anchors.insert(store.clone(), certs);
+        }
+        let registry = crate::registry::Registry::parse(
+            reference,
+            username,
+            password,
+            insecure || self.config.insecure,
+        )?;
+        registry.verify(&policy, &anchors).map(|_| ())
+    }
+
+    fn verify_pull_references(&self, request: &BuildRequest) -> Result<()> {
+        if self.config.trust_policy.is_none() {
+            return Ok(());
+        }
+        let dockerfile = std::fs::read_to_string(&request.dockerfile).map_err(|err| {
+            Error::new(
+                ErrorCode::InvalidArgument,
+                "cannot read Dockerfile for signature verification",
+                err.to_string(),
+            )
+        })?;
+        let credentials = self
+            .config
+            .auth_file
+            .as_deref()
+            .map(crate::registry::credentials_from_auth_file)
+            .transpose()?
+            .unwrap_or_default();
+        for line in dockerfile.lines() {
+            let mut words = line.split_whitespace();
+            if !words
+                .next()
+                .is_some_and(|word| word.eq_ignore_ascii_case("from"))
+            {
+                continue;
+            }
+            let image = words
+                .find(|word| !word.starts_with("--"))
+                .unwrap_or_default();
+            if image.is_empty() || image.eq_ignore_ascii_case("scratch") || image.starts_with("$") {
+                continue;
+            }
+            self.verify_image(image, &credentials.0, &credentials.1, false)?;
+        }
+        Ok(())
     }
 
     /// Add a new tag/name to an existing image in local storage.
@@ -387,15 +532,15 @@ impl Builder {
                 "",
             ));
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(rob_vm)]
         {
             crate::macos::tag(image, new_name)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         let image = cstring(image.as_bytes())?;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         let new_name = cstring(new_name.as_bytes())?;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         with_op(|| unsafe {
             let mut err = RobError::zero();
             let code = ffi::rob_tag(image.as_ptr(), new_name.as_ptr(), &mut err);
@@ -415,21 +560,21 @@ impl Builder {
                 "",
             ));
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(rob_vm)]
         {
             crate::macos::push(&request)
         }
-        #[cfg(not(target_os = "macos"))]
-        with_op(|| execute_push(&request))
+        #[cfg(not(rob_vm))]
+        with_op(|| execute_push(&request, &self.config))
     }
 
     /// Shut down the store and release graph driver mounts.
     pub fn shutdown(self) -> Result<()> {
-        #[cfg(target_os = "macos")]
+        #[cfg(rob_vm)]
         {
             crate::macos::shutdown()
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         with_op(|| unsafe {
             let mut err = RobError::zero();
             let code = ffi::rob_shutdown(&mut err);
@@ -443,11 +588,11 @@ impl Builder {
     /// Warnings are included in an `Ok` report.
     pub fn diagnose() -> Result<String> {
         startup()?;
-        #[cfg(target_os = "macos")]
+        #[cfg(rob_vm)]
         {
             crate::macos::diagnose()
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(rob_vm))]
         with_op(|| unsafe {
             let mut buf = RobBuffer::zero();
             let mut err = RobError::zero();
@@ -477,15 +622,18 @@ impl Builder {
 /// parent waits for the child and exits with the child's status, and the
 /// child's `argv[0]` has a `-in-a-user-namespace` suffix.
 ///
-/// On macOS this returns immediately. The Linux engine starts later, inside
-/// the guest, on the first build, tag, or push. On other non-Linux builds
+/// On macOS this does not start an engine. The Linux engine starts later,
+/// inside the guest, on the first build, tag, or push. If the binary lacks the
+/// `com.apple.security.virtualization` entitlement, it signs itself ad hoc and
+/// re-executes with the same arguments (`ROB_NO_SELF_SIGN=1` turns that off). On other non-Linux builds
 /// this returns [`ErrorCode::Unsupported`] and does not touch a Buildah engine.
 pub fn startup() -> Result<()> {
-    #[cfg(target_os = "macos")]
+    #[cfg(rob_vm)]
     {
+        crate::entitlement::ensure();
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(rob_vm))]
     with_op(|| unsafe {
         let mut err = RobError::zero();
         let code = ffi::rob_startup(&mut err);
@@ -524,7 +672,7 @@ fn execute_build(request: &BuildRequest, paths: &PreparedPaths) -> Result<ImageI
     let context_dir = cstring_path(&paths.context_dir)?;
     let tag = opt_cstring(request.tag.as_deref().unwrap_or(""))?;
     let target = opt_cstring(request.target.as_deref().unwrap_or(""))?;
-    let isolation = opt_cstring(request.isolation.as_abi())?;
+    let isolation = opt_cstring(request.isolation.for_engine(EngineHost::Linux)?)?;
     let format = opt_cstring(request.format.as_abi())?;
     let pull = opt_cstring(request.pull.as_abi())?;
     let os_name = opt_cstring(request.os.as_deref().unwrap_or(""))?;
@@ -533,6 +681,7 @@ fn execute_build(request: &BuildRequest, paths: &PreparedPaths) -> Result<ImageI
     let arg_keys = CStringList::from_strings(request.build_args.keys().map(String::as_str))?;
     let arg_vals = CStringList::from_strings(request.build_args.values().map(String::as_str))?;
     let labels = CStringList::from_strings(request.labels.iter().map(|(k, v)| format!("{k}={v}")))?;
+    let excludes = CStringList::from_strings(paths.excludes.iter().map(String::as_str))?;
     let slot = request
         .on_log
         .clone()
@@ -568,6 +717,8 @@ fn execute_build(request: &BuildRequest, paths: &PreparedPaths) -> Result<ImageI
         no_cache: i32::from(request.no_cache),
         squash: i32::from(request.squash),
         quiet: i32::from(request.quiet),
+        excludes: excludes.as_ptr(),
+        exclude_count: excludes.len(),
     };
     unsafe {
         let mut out = RobResult::zero();
@@ -583,7 +734,7 @@ fn execute_build(request: &BuildRequest, paths: &PreparedPaths) -> Result<ImageI
     }
 }
 
-fn execute_push(request: &PushRequest) -> Result<ImageInfo> {
+fn execute_push(request: &PushRequest, config: &Config) -> Result<ImageInfo> {
     let image = cstring(request.image.as_bytes())?;
     let destination = cstring(request.destination.as_bytes())?;
     let username = opt_cstring(&request.username)?;
@@ -618,7 +769,30 @@ fn execute_push(request: &PushRequest) -> Result<ImageInfo> {
         let mut err = RobError::zero();
         let code = ffi::rob_push(&raw, &mut out, &mut err);
         let result = match take_status(code, &err) {
-            Ok(()) => Ok(take_info(&out)),
+            Ok(()) => {
+                let info = take_info(&out);
+                if request.sign {
+                    let material = crate::notary::validate_signing_config(
+                        config.signing_key.as_deref(),
+                        &config.signing_cert_chain,
+                    )?
+                    .ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::InvalidArgument,
+                            "signature requested but no signing key is configured",
+                            "set Config.signing_key",
+                        )
+                    })?;
+                    let registry = crate::registry::Registry::parse(
+                        &request.destination,
+                        &request.username,
+                        &request.password,
+                        request.insecure || config.insecure,
+                    )?;
+                    registry.sign_push(&material)?;
+                }
+                Ok(info)
+            }
             Err(error) => Err(error),
         };
         ffi::rob_result_free(&mut out);
@@ -646,7 +820,8 @@ impl HeldConfig {
                 .unwrap_or(""),
         )?;
         let registries_conf = hold_path(&mut owned, config.registries_conf.as_deref())?;
-        let signature_policy = hold_path(&mut owned, config.signature_policy.as_deref())?;
+        let policy = crate::policy::effective_signature_policy(config.signature_policy.as_deref())?;
+        let signature_policy = hold_path(&mut owned, policy.as_deref())?;
         let auth_file = hold_path(&mut owned, config.auth_file.as_deref())?;
         let log_level = hold_str(&mut owned, config.log_level.as_abi())?;
         let opts = CStringList::from_strings(config.storage_opts.iter().map(String::as_str))?;
@@ -846,13 +1021,13 @@ mod tests {
 
     #[test]
     fn startup_on_the_stub_is_unsupported() {
-        #[cfg(all(rob_stub, not(target_os = "macos")))]
+        #[cfg(all(rob_stub, not(rob_vm)))]
         {
             let err = startup().expect_err("stub startup");
             assert_eq!(err.code(), ErrorCode::Unsupported);
             assert!(err.to_string().to_lowercase().contains("linux"));
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(rob_vm)]
         startup().expect("macos startup does not boot a guest");
     }
 

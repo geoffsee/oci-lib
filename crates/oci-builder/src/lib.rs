@@ -40,11 +40,19 @@ pub use proto as rob_proto;
 
 mod builder;
 mod config;
+#[cfg(rob_vm)]
+mod entitlement;
 mod error;
 mod ffi;
-#[cfg(target_os = "macos")]
+#[cfg(any(rob_vm, test))]
+mod guest_record;
+mod ignore;
+#[cfg(rob_vm)]
 mod macos;
-#[cfg(any(target_os = "macos", test))]
+mod notary;
+mod policy;
+mod registry;
+#[cfg(any(rob_vm, test))]
 mod shares;
 
 // Pull native/unshare_early.c into the link so its constructor runs.

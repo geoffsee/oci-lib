@@ -17,10 +17,13 @@ A Rust monorepo for daemonless OCI image building and container execution.
 | [`oci-builder`](crates/oci-builder) | `oci-builder` | [Buildah](https://github.com/containers/buildah) | Build & push OCI container images | In-process Go c-archive (`startup()`) | Apple Virtualization Linux guest (vsock) |
 | [`oci-runner`](crates/oci-runner) | `oci-runner` | [libcontainer](https://github.com/opencontainers/runc/tree/main/libcontainer) | Execute foreground containers from a rootfs | In-process Go c-archive (`startup()`) | Apple Virtualization Linux guest (vsock) |
 
-Both crates share a unified architectural pattern:
+[`oci-util`](crates/oci-util) provides the shared utility library, including the
+module structure for Notary Project signature helpers.
+
+The builder and runner share a unified architectural pattern:
 - **Zero Daemons**: Everything executes synchronously in-process.
 - **Linux**: Statically links Go c-archives with early constructors (priority 101) to handle Linux user and mount namespaces without separate helper executables.
-- **macOS**: Transparently manages a tiny Apple Virtualization Linux guest communicating via length-prefixed virtio-vsock frames over port 5253.
+- **macOS** (default `vm` feature): Transparently manages a tiny Apple Virtualization Linux guest communicating via length-prefixed virtio-vsock frames over port 5253. The guest kernel and initramfs are zstd-compressed into the binary.
 - **Self-Contained**: Can be embedded directly into orchestrators, test harnesses, or Kubernetes node runtimes (such as `rubix-kube`).
 
 ---
@@ -38,12 +41,16 @@ oci-builder = "0.1"
 oci-runner = "0.1"
 ```
 
+On macOS, the default `vm` feature runs the engine in an Apple Virtualization Linux guest embedded in the binary. Its dependencies are macOS-only, so other platforms compile nothing extra. With `default-features = false`, macOS builds link the stub and return `ErrorCode::Unsupported`; add `features = ["vm"]` to keep the guest. `oci-builder`'s default features also include `default-policy`, which supplies the containers-common signature policy when none is configured. `--no-default-features` turns that off along with `vm`.
+
 ### Install CLI Tools
 
 ```bash
 cargo install oci-builder
 cargo install oci-runner
 ```
+
+A macOS build embeds the guest from `crates/<crate>/guest/out/` when present. Otherwise it downloads the release's kernel and initramfs into `~/Library/Caches/<crate>/downloads` (override with `ROB_GUEST_CACHE` / `ROR_GUEST_CACHE`), verifies their checksums, and embeds them.
 
 ---
 
@@ -143,11 +150,12 @@ oci-lib/
 │   ├── entitlements.plist      # Virtualization entitlements
 │   ├── macos-rustc-and-sign.sh
 │   └── macos-sign-and-run.sh
+├── xtask/                      # `cargo xtask guest`: builds the macOS Linux guest and holds its init scripts (run on Linux)
 └── crates/
     ├── oci-builder/            # Buildah image builder crate (lib & CLI)
     │   ├── Cargo.toml
     │   ├── build.rs
-    │   ├── guest/              # Guest VM build scripts and initramfs
+    │   ├── guest/out/          # Built guest kernel and initramfs (not committed)
     │   ├── native/             # Early constructor
     │   ├── shim/               # Go Buildah c-archive shim
     │   ├── src/                # Library & CLI sources
@@ -155,7 +163,7 @@ oci-lib/
     └── oci-runner/             # libcontainer runtime crate (lib & CLI)
         ├── Cargo.toml
         ├── build.rs
-        ├── guest/              # Guest VM build scripts and initramfs
+        ├── guest/out/          # Built guest kernel and initramfs (not committed)
         ├── native/             # Early constructor
         ├── shim/               # Go libcontainer c-archive shim
         ├── src/                # Library & CLI sources
@@ -173,6 +181,9 @@ cargo build --workspace
 
 # Run tests
 cargo test --workspace
+
+# macOS, without the Linux guest
+cargo build --workspace --no-default-features
 ```
 
 ### Running on Linux
@@ -182,14 +193,16 @@ The Linux Go shims compile natively using CGO:
 - Optional `libseccomp-dev` for seccomp filtering
 
 ### Codesigning on macOS
-Apple Virtualization requires the `com.apple.security.virtualization` entitlement. When running `cargo build`, `cargo test`, or `cargo run`, the scripts in [`.cargo/config.toml`](.cargo/config.toml) automatically sign compiled binaries with [`scripts/entitlements.plist`](scripts/entitlements.plist).
+Apple Virtualization requires the `com.apple.security.virtualization` entitlement. Both crates embed it: when `startup()` finds the running binary without it (for example after `cargo install`, or in a crate that depends on these), it signs the executable ad hoc and re-executes it with the same arguments. Set `ROB_NO_SELF_SIGN=1` / `ROR_NO_SELF_SIGN=1` to turn that off; `diagnose` then prints the `codesign` command. If the binary's directory is not writable, signing is skipped and `diagnose` reports it.
+
+In this repo, `cargo build`, `cargo test`, and `cargo run` also sign binaries through the scripts in [`.cargo/config.toml`](.cargo/config.toml), which covers test harnesses that never call `startup()`.
 
 ---
 
 ## Limitations
 
 - **Early `startup()` Execution**: On Linux, `startup()` must be called as the very first line of `main()`, before any threads, async runtimes (e.g. Tokio), or CLI argument parsers are initialized. Both Buildah and libcontainer re-execute `/proc/self/exe` into isolated namespaces.
-- **Platform Scope**: Full in-process execution is supported on Linux (native namespaces and cgroups) and macOS (via lightweight Apple Virtualization guests). Other platforms (such as Windows) link a stub returning `ErrorCode::Unsupported`.
+- **Platform Scope**: Full in-process execution is supported on Linux (native namespaces and cgroups) and macOS (via lightweight Apple Virtualization guests, the default `vm` feature). Other platforms (such as Windows), and macOS with `vm` turned off, link a stub returning `ErrorCode::Unsupported`.
 - **Rootless & Kernel Namespace Support**: Non-root execution on Linux requires host kernel unprivileged user namespace support (`/proc/sys/kernel/unprivileged_userns_clone = 1` or configured `/etc/subuid` and `/etc/subgid` mappings).
 - **Execution Scopes**:
   - `oci-builder`: Complex builds with `RUN` instructions require an OCI runtime (`runc` or `crun`) on `$PATH`.

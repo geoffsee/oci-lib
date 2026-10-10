@@ -1,3 +1,6 @@
+[alias]
+xtask = "run --package xtask --"
+
 [build]
 rustc-wrapper = "scripts/macos-rustc-and-sign.sh"
 

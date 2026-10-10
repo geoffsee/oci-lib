@@ -40,7 +40,7 @@ fn real_main() -> Result<(), Error> {
     let cli = Cli::parse();
     let command = cli.command.clone();
     let insecure = cli.insecure;
-    let config = cli.to_config();
+    let config = cli.try_to_config()?;
     match command {
         Command::Diagnose => {
             println!("{}", Builder::diagnose()?);
@@ -113,6 +113,7 @@ fn dispatch(builder: &Builder, command: Command, global_insecure: bool) -> Resul
             password_stdin,
             insecure,
             format,
+            sign,
         } => {
             let password = if password_stdin {
                 read_stdin_secret()?
@@ -124,6 +125,7 @@ fn dispatch(builder: &Builder, command: Command, global_insecure: bool) -> Resul
             request.password = password;
             request.insecure = insecure || global_insecure;
             request.format = format.map(Into::into);
+            request.sign = sign;
             request.on_log = Some(std::sync::Arc::new(write_stderr));
             print_info(&builder.push(request)?);
             Ok(())
@@ -248,6 +250,22 @@ struct Cli {
     #[arg(long, global = true)]
     auth_file: Option<PathBuf>,
 
+    /// PKCS8 private key used by `push --sign`.
+    #[arg(long, global = true)]
+    signing_key: Option<PathBuf>,
+
+    /// DER certificate chain used by `push --sign` (leaf first).
+    #[arg(long = "signing-cert", global = true)]
+    signing_cert_chain: Vec<PathBuf>,
+
+    /// Notary trust policy used to verify remote `FROM` images.
+    #[arg(long, global = true)]
+    trust_policy: Option<PathBuf>,
+
+    /// Notary trust anchor mapping, repeated as `store=/path/to/cert.der`.
+    #[arg(long = "trust-anchor", global = true)]
+    trust_anchor: Vec<String>,
+
     /// Allow HTTP registries and skip TLS verification.
     #[arg(long, global = true)]
     insecure: bool,
@@ -261,8 +279,8 @@ struct Cli {
 }
 
 impl Cli {
-    fn to_config(&self) -> Config {
-        Config {
+    fn try_to_config(&self) -> Result<Config, Error> {
+        Ok(Config {
             storage_root: self.root.clone(),
             run_root: self.runroot.clone(),
             storage_driver: self.storage_driver.map(StorageDriverArg::into),
@@ -272,7 +290,17 @@ impl Cli {
             auth_file: self.auth_file.clone(),
             insecure: self.insecure,
             log_level: self.log_level.into(),
-        }
+            signing_key: self.signing_key.clone(),
+            signing_cert_chain: self.signing_cert_chain.clone(),
+            trust_policy: self.trust_policy.clone(),
+            trust_anchors: trust_anchors(&self.trust_anchor)?,
+        })
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn to_config(&self) -> Config {
+        self.try_to_config()
+            .expect("invalid trust anchor mapping in test CLI configuration")
     }
 }
 
@@ -364,7 +392,36 @@ enum Command {
 
         #[arg(long, value_enum)]
         format: Option<FormatArg>,
+
+        /// Sign the pushed manifest and upload it as an OCI referrer.
+        #[arg(long)]
+        sign: bool,
     },
+}
+
+fn trust_anchors(values: &[String]) -> Result<BTreeMap<String, Vec<PathBuf>>, Error> {
+    let mut anchors = BTreeMap::new();
+    for value in values {
+        let Some((store, path)) = value.split_once('=') else {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "trust anchor must be store=path",
+                value,
+            ));
+        };
+        if store.is_empty() || path.is_empty() {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "trust anchor store and path are required",
+                value,
+            ));
+        }
+        anchors
+            .entry(store.to_string())
+            .or_insert_with(Vec::new)
+            .push(PathBuf::from(path));
+    }
+    Ok(anchors)
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

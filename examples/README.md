@@ -16,7 +16,7 @@ oci-builder \
 {"default":[{"type":"insecureAcceptAnything"}]}
 ```
 
-On macOS, build `guest/out/` with `guest/build.sh` on Linux first (arm64 Linux for Apple Silicon). A build with those files present embeds them into the binary. `cargo run -p oci-builder --` signs the binary and can run the same command. The guest is root, uses the `vfs` driver, and does not include `runc`, so keep `--isolation chroot` and `--pull never` for this image.
+On macOS, the build embeds the Linux guest into the binary. It uses `guest/out/` when present (built with `cargo xtask guest` on arm64 Linux), and otherwise downloads this version's kernel and initramfs into `~/Library/Caches/<crate>/downloads` and verifies them. `cargo run -p oci-builder --` signs the binary and can run the same command. The guest is root, uses the `vfs` driver, and does not include `runc`, so keep `--isolation chroot` and `--pull never` for this image.
 
 Podman uses its own store. The [CLI](../README.md#cli) section shows how to `push` a tag to a `docker-archive` and `podman load` it. On macOS, write that archive under `/mnt/policy` (the guest's view of the `--signature-policy` directory) so the tar remains on the Mac after the VM exits. `scratch-copy` contains only `/hello.txt`. `podman cp` writes a tar stream, and `tar -xO` prints `hello`.
 
