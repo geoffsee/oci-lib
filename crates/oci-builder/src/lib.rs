@@ -46,8 +46,10 @@ mod error;
 mod ffi;
 #[cfg(any(rob_vm, test))]
 mod guest_record;
+mod ignore;
 #[cfg(rob_vm)]
 mod macos;
+mod policy;
 #[cfg(any(rob_vm, test))]
 mod shares;
 

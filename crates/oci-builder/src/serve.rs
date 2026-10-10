@@ -245,6 +245,7 @@ fn run_build(
     request.build_args = build.build_args.iter().cloned().collect();
     request.labels = build.labels.iter().cloned().collect();
     request.layers = build.layers != 0;
+    request.excludes = build.excludes.clone();
     request.no_cache = build.no_cache;
     request.squash = build.squash;
     request.quiet = build.quiet;

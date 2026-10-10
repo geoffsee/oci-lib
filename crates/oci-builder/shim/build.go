@@ -60,6 +60,9 @@ func rob_build(req *C.rob_build_request, out *C.rob_result, errOut *C.rob_error)
 		args[keys[i]] = vals[i]
 	}
 	labels := goStrings(req.labels, req.label_count)
+	// Excludes replaces Buildah's ignore-file read when non-empty. The caller
+	// already selected the ignore file and appended BuildRequest excludes.
+	excludes := goStrings(req.excludes, req.exclude_count)
 	for _, label := range labels {
 		if !strings.Contains(label, "=") {
 			return fail(errOut, errInvalid, fmt.Sprintf("label %q is not key=value", label), "")
@@ -108,6 +111,7 @@ func rob_build(req *C.rob_build_request, out *C.rob_result, errOut *C.rob_error)
 		CommonBuildOpts:         &define.CommonBuildOptions{},
 		Target:                  goString(req.target),
 		Labels:                  labels,
+		Excludes:                excludes,
 		Layers:                  layers,
 		NoCache:                 req.no_cache != 0,
 		Squash:                  req.squash != 0,

@@ -37,7 +37,7 @@ use objc2_virtualization::{
 };
 
 use crate::builder::{BuildRequest, CancelToken, ImageInfo, LogRecord, LogStream, PreparedPaths};
-use crate::config::{Config, ImageFormat, StorageDriver};
+use crate::config::{Config, EngineHost, ImageFormat, StorageDriver};
 use crate::error::{Error, ErrorCode};
 use crate::shares::{Export, ShareRequest, guest_path, plan_shares};
 
@@ -76,7 +76,7 @@ struct Guest {
 
 static SESSION: Mutex<Option<Shared>> = Mutex::new(None);
 
-pub(crate) fn open(config: Config) -> Result<(), Error> {
+pub(crate) fn open(mut config: Config) -> Result<(), Error> {
     if !virtualization_supported() {
         return Err(fail(
             ErrorCode::Prerequisite,
@@ -86,6 +86,8 @@ pub(crate) fn open(config: Config) -> Result<(), Error> {
     if !crate::entitlement::present() {
         return Err(crate::entitlement::missing());
     }
+    config.signature_policy =
+        crate::policy::effective_signature_policy(config.signature_policy.as_deref())?;
     let (kernel, initrd) = locate_artifacts()?;
     let mut slot = SESSION.lock().unwrap_or_else(|poison| poison.into_inner());
     if slot.is_some() {
@@ -121,11 +123,15 @@ pub(crate) fn open(config: Config) -> Result<(), Error> {
 }
 
 pub(crate) fn build(request: &BuildRequest, paths: &PreparedPaths) -> Result<ImageInfo, Error> {
+    // Reject OCI isolation before any virtiofs device is created. The guest
+    // has no runc or crun; chroot is the supported isolation.
+    let isolation = request.isolation.for_engine(EngineHost::MacosGuest)?;
+    let staged = stage_build_context(paths)?;
     let exports = with_session(|shared| {
         prepare_dirs(&shared.config)?;
         let planned = plan_shares(ShareRequest {
-            context: Some(&paths.context_dir),
-            dockerfile: Some(&paths.dockerfile),
+            context: Some(&staged.context_dir),
+            dockerfile: Some(&staged.dockerfile),
             storage_root: shared.config.storage_root.as_deref(),
             run_root: shared.config.run_root.as_deref(),
             signature_policy: shared.config.signature_policy.as_deref(),
@@ -136,11 +142,11 @@ pub(crate) fn build(request: &BuildRequest, paths: &PreparedPaths) -> Result<Ima
         call_ensure(shared, planned)
     })?;
     let frame = HostFrame::Build(rob_proto::Build {
-        dockerfile: map_path(&paths.dockerfile, &exports)?,
-        context_dir: map_path(&paths.context_dir, &exports)?,
+        dockerfile: map_path(&staged.dockerfile, &exports)?,
+        context_dir: map_path(&staged.context_dir, &exports)?,
         tag: request.tag.clone().unwrap_or_default(),
         target: request.target.clone().unwrap_or_default(),
-        isolation: request.isolation.as_abi().to_string(),
+        isolation: isolation.to_string(),
         format: request.format.as_abi().to_string(),
         pull: request.pull.as_abi().to_string(),
         os: request.os.clone().unwrap_or_default(),
@@ -165,6 +171,7 @@ pub(crate) fn build(request: &BuildRequest, paths: &PreparedPaths) -> Result<Ima
             .as_ref()
             .map(CancelToken::raw_id)
             .unwrap_or(0),
+        excludes: staged.excludes,
     });
     rpc(frame, request.on_log.clone())
 }
@@ -518,6 +525,98 @@ fn map_path(path: &Path, exports: &[Export]) -> Result<String, Error> {
     guest_path(path, exports).map_err(|err| fail(ErrorCode::InvalidArgument, err))
 }
 
+/// Filtered copy of the build context. The same directory is reused for a
+/// given host context so a later build still sits inside the share the
+/// running guest already has. Children are replaced; the directory inode stays.
+fn stage_build_context(paths: &PreparedPaths) -> Result<PreparedPaths, Error> {
+    let root = std::env::temp_dir().join(format!("oci-builder-context-{}", std::process::id()));
+    std::fs::create_dir_all(&root).map_err(|err| {
+        fail(
+            ErrorCode::Internal,
+            format!("creating context stage root: {err}"),
+        )
+    })?;
+    let dest = root.join(stage_key(&paths.context_dir));
+    if dest.exists() {
+        clear_children(&dest)?;
+    }
+    std::fs::create_dir_all(&dest).map_err(|err| {
+        fail(
+            ErrorCode::Internal,
+            format!("creating staged context: {err}"),
+        )
+    })?;
+    crate::ignore::stage_context(
+        &paths.context_dir,
+        &paths.dockerfile,
+        &paths.excludes,
+        &dest,
+    )?;
+    let rel = paths
+        .dockerfile
+        .strip_prefix(&paths.context_dir)
+        .map_err(|_| {
+            fail(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "dockerfile {} is outside the build context {}",
+                    paths.dockerfile.display(),
+                    paths.context_dir.display()
+                ),
+            )
+        })?;
+    Ok(PreparedPaths {
+        dockerfile: dest.join(rel),
+        context_dir: dest,
+        excludes: paths.excludes.clone(),
+    })
+}
+
+fn stage_key(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in path.as_os_str().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn clear_children(dir: &Path) -> Result<(), Error> {
+    for entry in std::fs::read_dir(dir).map_err(|err| {
+        fail(
+            ErrorCode::Internal,
+            format!("reading staged context: {err}"),
+        )
+    })? {
+        let entry = entry.map_err(|err| {
+            fail(
+                ErrorCode::Internal,
+                format!("reading staged context: {err}"),
+            )
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|err| {
+            fail(
+                ErrorCode::Internal,
+                format!("reading staged context: {err}"),
+            )
+        })?;
+        let result = if file_type.is_symlink() || file_type.is_file() {
+            std::fs::remove_file(&path)
+        } else {
+            std::fs::remove_dir_all(&path)
+        };
+        result.map_err(|err| {
+            fail(
+                ErrorCode::Internal,
+                format!("clearing staged context: {err}"),
+            )
+        })?;
+    }
+    Ok(())
+}
+
 fn exchange(
     read: &mut File,
     write: &Arc<Mutex<Option<File>>>,
@@ -798,7 +897,7 @@ fn vm_config(
             objc2_virtualization::VZSharedDirectory::initWithURL_readOnly(
                 objc2_virtualization::VZSharedDirectory::alloc(),
                 &host_url,
-                false,
+                export.read_only,
             )
         };
         let share = unsafe {

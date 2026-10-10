@@ -41,7 +41,7 @@ oci-builder = "0.1"
 oci-runner = "0.1"
 ```
 
-On macOS, the default `vm` feature runs the engine in an Apple Virtualization Linux guest embedded in the binary. Its dependencies are macOS-only, so other platforms compile nothing extra. With `default-features = false`, macOS builds link the stub and return `ErrorCode::Unsupported`; add `features = ["vm"]` to keep the guest.
+On macOS, the default `vm` feature runs the engine in an Apple Virtualization Linux guest embedded in the binary. Its dependencies are macOS-only, so other platforms compile nothing extra. With `default-features = false`, macOS builds link the stub and return `ErrorCode::Unsupported`; add `features = ["vm"]` to keep the guest. `oci-builder`'s default features also include `default-policy`, which supplies the containers-common signature policy when none is configured. `--no-default-features` turns that off along with `vm`.
 
 ### Install CLI Tools
 

@@ -98,6 +98,9 @@ typedef struct rob_build_request {
 	int32_t no_cache;
 	int32_t squash;
 	int32_t quiet;
+	/* Dockerignore patterns. Empty leaves Buildah's own ignore-file read. */
+	const char *const *excludes;
+	size_t exclude_count;
 } rob_build_request;
 
 typedef struct rob_push_request {
@@ -120,7 +123,7 @@ _Static_assert(sizeof(rob_buffer) == 16, "rob_buffer");
 _Static_assert(sizeof(rob_error) == 40, "rob_error");
 _Static_assert(sizeof(rob_result) == 48, "rob_result");
 _Static_assert(sizeof(rob_config) == 80, "rob_config");
-_Static_assert(sizeof(rob_build_request) == 160, "rob_build_request");
+_Static_assert(sizeof(rob_build_request) == 176, "rob_build_request");
 _Static_assert(sizeof(rob_push_request) == 72, "rob_push_request");
 _Static_assert(offsetof(rob_error, message) == 8, "rob_error.message");
 _Static_assert(offsetof(rob_config, storage_opts) == 56, "rob_config.storage_opts");
@@ -128,6 +131,8 @@ _Static_assert(offsetof(rob_config, insecure) == 72, "rob_config.insecure");
 _Static_assert(offsetof(rob_build_request, log_fn) == 104, "rob_build_request.log_fn");
 _Static_assert(offsetof(rob_build_request, cancel_token) == 136, "rob_build_request.cancel_token");
 _Static_assert(offsetof(rob_build_request, layers) == 144, "rob_build_request.layers");
+_Static_assert(offsetof(rob_build_request, excludes) == 160, "rob_build_request.excludes");
+_Static_assert(offsetof(rob_build_request, exclude_count) == 168, "rob_build_request.exclude_count");
 _Static_assert(offsetof(rob_push_request, log_fn) == 40, "rob_push_request.log_fn");
 _Static_assert(offsetof(rob_push_request, cancel_token) == 56, "rob_push_request.cancel_token");
 _Static_assert(offsetof(rob_push_request, insecure) == 64, "rob_push_request.insecure");

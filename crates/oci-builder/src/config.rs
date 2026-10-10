@@ -19,7 +19,17 @@ pub struct Config {
     pub storage_opts: Vec<String>,
     /// Path to `registries.conf`.
     pub registries_conf: Option<PathBuf>,
-    /// Path to a signature `policy.json`. Pulls fail closed when no policy can be found.
+    /// Path to a signature `policy.json`.
+    ///
+    /// `None` with the `default-policy` feature (on by default) uses an
+    /// embedded containers-common policy, written to a temporary file for
+    /// this process: the default requirement is `reject`, the `docker`
+    /// transport for hostname `localhost` is `insecureAcceptAnything`, and
+    /// the `docker-daemon` transport with an empty host is
+    /// `insecureAcceptAnything`. That is not a global
+    /// `insecureAcceptAnything`. A path set here is used as-is.
+    /// Without the feature, `None` leaves discovery to containers/image,
+    /// which fails closed when no policy file exists.
     pub signature_policy: Option<PathBuf>,
     /// Path to an auth file. Push can also take a username and password per call.
     pub auth_file: Option<PathBuf>,
@@ -95,17 +105,38 @@ impl LogLevel {
 ///
 /// `Default` follows `$BUILDAH_ISOLATION` and, when that is unset, uses
 /// rootless isolation inside a user namespace and the default isolation as root.
+/// On the macOS guest, `Default` is sent as `chroot` and `Oci` / `Rootless`
+/// are rejected before the VM starts: that guest has no OCI runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Isolation {
     /// Follow `$BUILDAH_ISOLATION` or platform defaults.
+    ///
+    /// On the macOS guest this is sent as `chroot`. On Linux it stays the
+    /// engine default.
     #[default]
     Default,
     /// OCI runtime (runc or crun) in a separate namespace.
+    ///
+    /// Rejected on the macOS guest before the VM starts.
     Oci,
     /// Rootless OCI runtime.
+    ///
+    /// Rejected on the macOS guest before the VM starts.
     Rootless,
     /// `chroot` into the rootfs. Scratch and `COPY` builds do not need runc.
+    ///
+    /// This is the supported isolation for the macOS guest.
     Chroot,
+}
+
+/// Which engine a build will talk to. Linux behavior stays on [`Isolation::as_abi`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EngineHost {
+    /// Apple Virtualization Linux guest. No `runc` or `crun`.
+    #[cfg_attr(not(any(rob_vm, test)), allow(dead_code))]
+    MacosGuest,
+    /// In-process Linux engine.
+    Linux,
 }
 
 impl Isolation {
@@ -115,6 +146,25 @@ impl Isolation {
             Self::Oci => "oci",
             Self::Rootless => "rootless",
             Self::Chroot => "chroot",
+        }
+    }
+
+    /// Isolation string for this host.
+    ///
+    /// `MacosGuest` maps `Default` and `Chroot` to `chroot` and returns an
+    /// error for `Oci` and `Rootless`. `Linux` is [`Self::as_abi`], so
+    /// `Default` stays the engine default (an empty string) and is not rewritten.
+    pub(crate) fn for_engine(self, host: EngineHost) -> Result<&'static str, crate::error::Error> {
+        match host {
+            EngineHost::Linux => Ok(self.as_abi()),
+            EngineHost::MacosGuest => match self {
+                Self::Default | Self::Chroot => Ok("chroot"),
+                Self::Oci | Self::Rootless => Err(crate::error::Error::new(
+                    crate::error::ErrorCode::Unsupported,
+                    "this guest has no OCI runtime; chroot is the supported isolation",
+                    "",
+                )),
+            },
         }
     }
 }
@@ -160,5 +210,56 @@ impl PullPolicy {
             Self::IfNewer => "ifnewer",
             Self::Never => "never",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn macos_guest_defaults_to_chroot_and_rejects_oci() {
+        assert_eq!(
+            Isolation::Default
+                .for_engine(EngineHost::MacosGuest)
+                .unwrap(),
+            "chroot"
+        );
+        assert_eq!(
+            Isolation::Chroot
+                .for_engine(EngineHost::MacosGuest)
+                .unwrap(),
+            "chroot"
+        );
+        for isolation in [Isolation::Oci, Isolation::Rootless] {
+            let err = isolation.for_engine(EngineHost::MacosGuest).unwrap_err();
+            let text = err.to_string();
+            assert!(
+                text.contains("no OCI runtime"),
+                "missing runtime note: {text}"
+            );
+            assert!(
+                text.contains("chroot is the supported isolation"),
+                "missing chroot note: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn linux_default_stays_the_engine_default() {
+        assert_eq!(
+            Isolation::Default.for_engine(EngineHost::Linux).unwrap(),
+            Isolation::Default.as_abi()
+        );
+        assert_eq!(Isolation::Default.as_abi(), "");
+        assert_eq!(Isolation::Oci.for_engine(EngineHost::Linux).unwrap(), "oci");
+        assert_eq!(
+            Isolation::Rootless.for_engine(EngineHost::Linux).unwrap(),
+            "rootless"
+        );
+        assert_eq!(
+            Isolation::Chroot.for_engine(EngineHost::Linux).unwrap(),
+            "chroot"
+        );
     }
 }

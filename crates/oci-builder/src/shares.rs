@@ -21,11 +21,16 @@ pub const GUEST_REGISTRIES: &str = "/mnt/registries";
 pub const GUEST_AUTH: &str = "/mnt/auth";
 
 /// One host directory mounted in the guest at `guest`.
+///
+/// `read_only` is set for the build-context share only. The storage root
+/// stays writable because the guest writes its graph image there. Other
+/// shares stay writable too.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Export {
     pub tag: &'static str,
     pub host: PathBuf,
     pub guest: &'static str,
+    pub read_only: bool,
 }
 
 /// Directories the next boot has to export.
@@ -55,22 +60,28 @@ pub fn plan_shares(request: ShareRequest<'_>) -> Result<Vec<Export>, String> {
     }
     let mut exports = Vec::new();
     if let Some(context) = request.context {
-        add_dir(&mut exports, TAG_CONTEXT, GUEST_CONTEXT, context)?;
+        add_dir(&mut exports, TAG_CONTEXT, GUEST_CONTEXT, context, true)?;
     }
     if let Some(root) = request.storage_root {
-        add_dir(&mut exports, TAG_ROOT, GUEST_ROOT, root)?;
+        add_dir(&mut exports, TAG_ROOT, GUEST_ROOT, root, false)?;
     }
     if let Some(run) = request.run_root {
-        add_dir(&mut exports, TAG_RUNROOT, GUEST_RUNROOT, run)?;
+        add_dir(&mut exports, TAG_RUNROOT, GUEST_RUNROOT, run, false)?;
     }
     if let Some(policy) = request.signature_policy {
-        add_file_parent(&mut exports, TAG_POLICY, GUEST_POLICY, policy)?;
+        add_file_parent(&mut exports, TAG_POLICY, GUEST_POLICY, policy, false)?;
     }
     if let Some(registries) = request.registries_conf {
-        add_file_parent(&mut exports, TAG_REGISTRIES, GUEST_REGISTRIES, registries)?;
+        add_file_parent(
+            &mut exports,
+            TAG_REGISTRIES,
+            GUEST_REGISTRIES,
+            registries,
+            false,
+        )?;
     }
     if let Some(auth) = request.auth_file {
-        add_file_parent(&mut exports, TAG_AUTH, GUEST_AUTH, auth)?;
+        add_file_parent(&mut exports, TAG_AUTH, GUEST_AUTH, auth, false)?;
     }
     Ok(exports)
 }
@@ -110,6 +121,7 @@ fn add_dir(
     tag: &'static str,
     guest: &'static str,
     dir: &Path,
+    read_only: bool,
 ) -> Result<(), String> {
     let host = canonicalize(dir)?;
     if !host.is_dir() {
@@ -118,7 +130,12 @@ fn add_dir(
     if exports.iter().any(|export| export.host == host) {
         return Ok(());
     }
-    exports.push(Export { tag, host, guest });
+    exports.push(Export {
+        tag,
+        host,
+        guest,
+        read_only,
+    });
     Ok(())
 }
 
@@ -127,6 +144,7 @@ fn add_file_parent(
     tag: &'static str,
     guest: &'static str,
     file: &Path,
+    read_only: bool,
 ) -> Result<(), String> {
     let file = canonicalize(file)?;
     if !file.is_file() {
@@ -135,7 +153,7 @@ fn add_file_parent(
     let parent = file
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", file.display()))?;
-    add_dir(exports, tag, guest, parent)
+    add_dir(exports, tag, guest, parent, read_only)
 }
 
 fn canonicalize(path: &Path) -> Result<PathBuf, String> {
@@ -185,6 +203,27 @@ mod tests {
         assert!(exports.iter().any(|export| export.tag == TAG_CONTEXT));
         assert!(exports.iter().any(|export| export.tag == TAG_ROOT));
         assert!(exports.iter().any(|export| export.tag == TAG_POLICY));
+        assert!(
+            exports
+                .iter()
+                .find(|export| export.tag == TAG_CONTEXT)
+                .unwrap()
+                .read_only
+        );
+        assert!(
+            !exports
+                .iter()
+                .find(|export| export.tag == TAG_ROOT)
+                .unwrap()
+                .read_only
+        );
+        assert!(
+            !exports
+                .iter()
+                .find(|export| export.tag == TAG_POLICY)
+                .unwrap()
+                .read_only
+        );
 
         let guest_docker = guest_path(&dockerfile, &exports).unwrap();
         assert_eq!(guest_docker, "/mnt/context/Dockerfile");

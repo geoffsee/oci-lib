@@ -91,6 +91,37 @@ oci-builder --root /tmp/graph --runroot /tmp/run --storage-driver vfs \
 {"default":[{"type":"insecureAcceptAnything"}]}
 ```
 
+Passing `--signature-policy` is optional when the `default-policy` feature is on (it is part of the default features). An unset policy then uses the containers-common rules below, not a global `insecureAcceptAnything`.
+
+---
+
+## Signature policy
+
+`default-policy` is a default feature. When `Config.signature_policy` is `None`, the library writes an embedded policy to a temporary file and passes that path to containers/image:
+
+- `default` is `reject`
+- `docker` transport, hostname `localhost`: `insecureAcceptAnything`
+- `docker-daemon` transport, empty host: `insecureAcceptAnything`
+
+A path you set is used as-is, and the embedded policy is not. Without the feature, `None` leaves discovery to containers/image, which fails closed when no policy file exists. On macOS, turn the feature off with `--no-default-features --features vm`. On Linux, `--no-default-features` is enough.
+
+---
+
+## Ignore files and excludes
+
+`BuildRequest.excludes` adds dockerignore patterns. Empty means no extra patterns. The ignore file is chosen the way Buildah v1.45.1 `parse.ContainerIgnoreFile` chooses it:
+
+- A Dockerfile-specific ignore beside the Dockerfile is chosen before context-root files.
+- If both `<Dockerfile>.containerignore` and `<Dockerfile>.dockerignore` exist, `.dockerignore` wins.
+- Otherwise the context-root `.containerignore` is used when present, else the context-root `.dockerignore`. The two root files are not merged.
+- `excludes` are appended after that file. They do not replace it.
+
+Syntax is Docker's dockerignore. Blank lines and `#` comments are ignored, `!` negates, the last match wins, and `**` matches across directories. A pattern `.env*` does not exclude `nested/.env.synthetic`. Pass `**/.env*` (or the same pattern in `excludes`) to match that name in every directory.
+
+On macOS the build context exported to the guest is a filtered copy of that directory. Excluded paths are not on the virtiofs share. The Dockerfile is always staged, even if a pattern names it. Ignore files may be omitted from the guest. That share is read-only. The storage-root share stays writable, because the guest writes its graph there. On Linux there is no guest share; the same patterns are still passed to Buildah so `COPY` and `ADD` honor them.
+
+On macOS, `Isolation::Default` (the CLI default) is sent as `chroot`. `Isolation::Oci` and `Isolation::Rootless` fail before the VM starts: this guest has no OCI runtime, and `chroot` is the supported isolation. Linux isolation is unchanged.
+
 ---
 
 ## Build Requirements
@@ -106,7 +137,7 @@ oci-builder --root /tmp/graph --runroot /tmp/run --storage-driver vfs \
 - **Rootless User Namespaces**: Building images rootless requires user namespaces (`/proc/sys/kernel/unprivileged_userns_clone = 1` or configured `/etc/subuid` and `/etc/subgid` ranges).
 - **Isolation Dependencies**:
   - `chroot` isolation supports simple container builds (such as `FROM scratch` with `COPY`) without external helper binaries.
-  - `oci` and `rootless` isolation require an OCI runtime binary (`runc` or `crun`) present on `$PATH` to execute `RUN` instructions.
+  - `oci` and `rootless` isolation require an OCI runtime binary (`runc` or `crun`) present on `$PATH` to execute `RUN` instructions. The macOS guest has neither, so those modes fail before the VM starts and the default is `chroot`.
   - Builds requiring network access during `RUN` instructions require network helper utilities (`netavark` or CNI).
 - **macOS Guest Ephemeral Storage**: On macOS, builds execute inside a managed Linux Virtualization guest. Output artifacts (like pushed `docker-archive` tarballs) must target shared virtiofs mount directories to persist onto the macOS host.
 - **Storage Driver in Nested Environments**: When running inside an existing Docker or container environment that lacks nested overlayfs kernel support, the `vfs` storage driver must be selected (`--storage-driver vfs`).

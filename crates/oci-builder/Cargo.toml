@@ -18,11 +18,15 @@ name = "oci-builder"
 path = "src/main.rs"
 
 [features]
-default = ["vm"]
+default = ["vm", "default-policy"]
 # Run the engine on macOS inside an Apple Virtualization Linux guest that is
 # embedded in the binary. Every dependency it enables is macOS-only, so other
 # platforms build nothing extra. macOS without it links the unsupported stub.
 vm = ["dep:block2", "dep:dispatch2", "dep:flate2", "dep:objc2", "dep:objc2-foundation", "dep:objc2-virtualization", "dep:zstd"]
+# When Config.signature_policy is unset, materialize the containers-common
+# default policy (reject, docker localhost, docker-daemon). Without this
+# feature an unset policy fails closed.
+default-policy = []
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
