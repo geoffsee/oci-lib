@@ -162,6 +162,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          version="${GITHUB_REF_NAME#v}"
           for bin_name in oci-builder oci-runner; do
             bin="target/release/$bin_name"
             codesign --verify --verbose=2 "$bin"
@@ -171,8 +172,23 @@ jobs:
             "$bin" --help >/dev/null
             cp "$bin" "dist/$bin_name"
           done
-          ./target/release/oci-builder diagnose >/dev/null
-          ./target/release/oci-runner diagnose >/dev/null
+          for bin_name in oci-builder oci-runner; do
+            report=$("target/release/$bin_name" diagnose 2>&1) || status=$?
+            status=${status:-0}
+            printf '%s\n' "$report"
+            # GitHub's hosted macOS runner does not expose
+            # Virtualization.framework. The command remains blocked there,
+            # but its embedded guest/attestation report must still be valid.
+            if [ "$status" -ne 0 ] && ! grep -q 'Virtualization.framework is not available' <<<"$report"; then
+              echo "$bin_name diagnose failed" >&2
+              exit "$status"
+            fi
+            grep -q "embedded guest package $bin_name $version" <<<"$report"
+            grep -q 'embedded guest protocol version 2' <<<"$report"
+            grep -q 'embedded guest kernel sha256' <<<"$report"
+            grep -q 'embedded guest initramfs sha256' <<<"$report"
+            unset status
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: aarch64-apple-darwin
