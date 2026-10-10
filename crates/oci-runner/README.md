@@ -105,7 +105,7 @@ oci-runner run \
 ## Build Requirements
 
 - **Linux**: Go ≥ 1.26, C compiler (`gcc` or `clang`), `pkg-config`, and optionally `libseccomp-dev`.
-- **macOS**: Built-in Apple Virtualization framework. Codesigning is automatically handled via `.cargo/config.toml` with the `com.apple.security.virtualization` entitlement.
+- **macOS**: Built-in Apple Virtualization framework. `startup()` signs the binary with the embedded `com.apple.security.virtualization` entitlement when it is missing, then re-executes it.
 
 ---
 

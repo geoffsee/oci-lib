@@ -80,6 +80,9 @@ pub(crate) fn open() -> Result<(), Error> {
             "Apple Virtualization.framework is not available on this Mac",
         ));
     }
+    if !crate::entitlement::present() {
+        return Err(crate::entitlement::missing());
+    }
     let (kernel, initrd) = locate_artifacts()?;
     let mut slot = SESSION.lock().unwrap_or_else(|poison| poison.into_inner());
     if slot.is_some() {
@@ -142,6 +145,14 @@ pub(crate) fn diagnose() -> Result<String, Error> {
         blocked = true;
         lines
             .push("[fail] Apple Virtualization.framework is not available on this Mac".to_string());
+    }
+    if crate::entitlement::present() {
+        lines.push("[ok] com.apple.security.virtualization entitlement".to_string());
+    } else {
+        blocked = true;
+        let err = crate::entitlement::missing();
+        lines.push(format!("[fail] {}", err.message()));
+        lines.push(err.detail().to_string());
     }
     match locate_artifacts() {
         Ok((kernel, initrd)) => {

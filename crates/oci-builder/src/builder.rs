@@ -477,12 +477,15 @@ impl Builder {
 /// parent waits for the child and exits with the child's status, and the
 /// child's `argv[0]` has a `-in-a-user-namespace` suffix.
 ///
-/// On macOS this returns immediately. The Linux engine starts later, inside
-/// the guest, on the first build, tag, or push. On other non-Linux builds
+/// On macOS this does not start an engine. The Linux engine starts later,
+/// inside the guest, on the first build, tag, or push. If the binary lacks the
+/// `com.apple.security.virtualization` entitlement, it signs itself ad hoc and
+/// re-executes with the same arguments (`ROB_NO_SELF_SIGN=1` turns that off). On other non-Linux builds
 /// this returns [`ErrorCode::Unsupported`] and does not touch a Buildah engine.
 pub fn startup() -> Result<()> {
     #[cfg(rob_vm)]
     {
+        crate::entitlement::ensure();
         Ok(())
     }
     #[cfg(not(rob_vm))]

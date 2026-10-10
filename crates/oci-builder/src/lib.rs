@@ -40,6 +40,8 @@ pub use proto as rob_proto;
 
 mod builder;
 mod config;
+#[cfg(rob_vm)]
+mod entitlement;
 mod error;
 mod ffi;
 #[cfg(rob_vm)]

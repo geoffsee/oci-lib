@@ -190,7 +190,9 @@ The Linux Go shims compile natively using CGO:
 - Optional `libseccomp-dev` for seccomp filtering
 
 ### Codesigning on macOS
-Apple Virtualization requires the `com.apple.security.virtualization` entitlement. When running `cargo build`, `cargo test`, or `cargo run`, the scripts in [`.cargo/config.toml`](.cargo/config.toml) automatically sign compiled binaries with [`scripts/entitlements.plist`](scripts/entitlements.plist).
+Apple Virtualization requires the `com.apple.security.virtualization` entitlement. Both crates embed it: when `startup()` finds the running binary without it (for example after `cargo install`, or in a crate that depends on these), it signs the executable ad hoc and re-executes it with the same arguments. Set `ROB_NO_SELF_SIGN=1` / `ROR_NO_SELF_SIGN=1` to turn that off; `diagnose` then prints the `codesign` command. If the binary's directory is not writable, signing is skipped and `diagnose` reports it.
+
+In this repo, `cargo build`, `cargo test`, and `cargo run` also sign binaries through the scripts in [`.cargo/config.toml`](.cargo/config.toml), which covers test harnesses that never call `startup()`.
 
 ---
 

@@ -32,6 +32,8 @@
 pub mod proto;
 pub use proto as ror_proto;
 
+#[cfg(ror_vm)]
+mod entitlement;
 mod error;
 mod ffi;
 #[cfg(target_os = "linux")]
@@ -65,7 +67,10 @@ pub type OutputFn = Arc<dyn Fn(u8, &[u8]) + Send + Sync>;
 ///
 /// On Linux this calls into the shim. The `init` child never reaches this
 /// function: Go `init` calls `libcontainer.Init` and does not return. On
-/// macOS this returns immediately so `--help` does not boot a guest.
+/// macOS this does not boot a guest, so `--help` stays local. If the binary
+/// lacks the `com.apple.security.virtualization` entitlement, it signs itself
+/// ad hoc and re-executes with the same arguments (`ROR_NO_SELF_SIGN=1`
+/// turns that off).
 pub fn startup() -> Result<(), Error> {
     #[cfg(target_os = "linux")]
     {
@@ -73,6 +78,7 @@ pub fn startup() -> Result<(), Error> {
     }
     #[cfg(ror_vm)]
     {
+        entitlement::ensure();
         Ok(())
     }
     #[cfg(not(any(target_os = "linux", ror_vm)))]
