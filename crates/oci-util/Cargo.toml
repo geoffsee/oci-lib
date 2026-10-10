@@ -8,6 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 description = "Shared OCI utility and signature helpers"
 readme = "README.md"
+publish = false
 
 [lib]
 name = "oci_util"

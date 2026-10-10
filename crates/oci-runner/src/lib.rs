@@ -44,6 +44,7 @@ mod linux;
 mod macos;
 #[cfg(not(any(target_os = "linux", ror_vm)))]
 mod other;
+mod protocol_version;
 mod request;
 #[cfg(any(ror_vm, test))]
 mod shares;

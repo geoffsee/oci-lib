@@ -8,16 +8,17 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{Arc, Mutex};
 
 use oci_runner::proto::{
-    GuestFrame, HostFrame, Run, VSOCK_PORT, read_host_frame, write_guest_frame,
+    GuestFrame, HostFrame, PROTOCOL_VERSION, Run, VSOCK_PORT, read_host_frame, write_guest_frame,
 };
 use oci_runner::{Error, ErrorCode, RunRequest, Runtime};
 
 pub fn engine_serve() -> Result<i32, Error> {
     let listener = vsock_listen(VSOCK_PORT)
         .map_err(|err| Error::new(ErrorCode::Prerequisite, format!("vsock listen: {err}"), ""))?;
-    let client = vsock_accept(&listener)
+    let mut client = vsock_accept(&listener)
         .map_err(|err| Error::new(ErrorCode::Internal, format!("vsock accept: {err}"), ""))?;
     drop(listener);
+    negotiate(&mut client)?;
     let mut read = client
         .try_clone()
         .map_err(|err| Error::new(ErrorCode::Internal, format!("vsock clone: {err}"), ""))?;
@@ -39,8 +40,26 @@ pub fn engine_serve() -> Result<i32, Error> {
 fn serve_loop(runtime: &Runtime, read: &mut File, write: &Arc<Mutex<File>>) -> Result<i32, Error> {
     loop {
         let frame = read_host_frame(read)
-            .map_err(|err| Error::new(ErrorCode::Internal, format!("vsock read: {err}"), ""))?;
+            .map_err(|err| {
+                Error::new(
+                    ErrorCode::InvalidArgument,
+                    "guest protocol mismatch",
+                    format!(
+                        "failed to decode a host frame: {err}; guest protocol version {PROTOCOL_VERSION}"
+                    ),
+                )
+            })?;
         match frame {
+            HostFrame::Hello { .. } => {
+                write_frame(
+                    write,
+                    &GuestFrame::Error {
+                        code: ErrorCode::InvalidArgument.as_exit(),
+                        message: "guest protocol handshake already completed".into(),
+                        detail: "the host sent a second handshake".into(),
+                    },
+                )?;
+            }
             HostFrame::Run(run) => {
                 let response = match handle_run(runtime, &run, write) {
                     Ok(code) => GuestFrame::Status { code },
@@ -52,6 +71,65 @@ fn serve_loop(runtime: &Runtime, read: &mut File, write: &Arc<Mutex<File>>) -> R
                 write_frame(write, &GuestFrame::Status { code: 0 })?;
                 return Ok(0);
             }
+        }
+    }
+}
+
+fn negotiate(client: &mut File) -> Result<(), Error> {
+    let frame = read_host_frame(client).map_err(|err| {
+        Error::new(
+            ErrorCode::InvalidArgument,
+            "guest protocol handshake failed",
+            format!("could not decode the host handshake: {err}"),
+        )
+    })?;
+    match frame {
+        HostFrame::Hello { protocol } if protocol == PROTOCOL_VERSION => write_guest_frame(
+            client,
+            &GuestFrame::Hello {
+                protocol: PROTOCOL_VERSION,
+            },
+        )
+        .map_err(|err| {
+            Error::new(
+                ErrorCode::Internal,
+                "guest protocol handshake failed",
+                err.to_string(),
+            )
+        }),
+        HostFrame::Hello { protocol } => {
+            let detail = format!(
+                "host requested protocol version {protocol}, guest implements {PROTOCOL_VERSION}"
+            );
+            let _ = write_guest_frame(
+                client,
+                &GuestFrame::Error {
+                    code: ErrorCode::InvalidArgument.as_exit(),
+                    message: "guest protocol mismatch".into(),
+                    detail: detail.clone(),
+                },
+            );
+            Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "guest protocol mismatch",
+                detail,
+            ))
+        }
+        other => {
+            let detail = format!("expected a protocol handshake, received {other:?}");
+            let _ = write_guest_frame(
+                client,
+                &GuestFrame::Error {
+                    code: ErrorCode::InvalidArgument.as_exit(),
+                    message: "guest protocol handshake required".into(),
+                    detail: detail.clone(),
+                },
+            );
+            Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "guest protocol handshake required",
+                detail,
+            ))
         }
     }
 }

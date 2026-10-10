@@ -18,7 +18,8 @@ A Rust monorepo for daemonless OCI image building and container execution.
 | [`oci-runner`](crates/oci-runner) | `oci-runner` | [libcontainer](https://github.com/opencontainers/runc/tree/main/libcontainer) | Execute foreground containers from a rootfs | In-process Go c-archive (`startup()`) | Apple Virtualization Linux guest (vsock) |
 
 [`oci-util`](crates/oci-util) provides the shared utility library, including the
-module structure for Notary Project signature helpers.
+module structure for Notary Project signature helpers. It is an internal
+workspace implementation and is not published as a standalone crate.
 
 The builder and runner share a unified architectural pattern:
 - **Zero Daemons**: Everything executes synchronously in-process.

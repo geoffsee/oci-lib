@@ -1,5 +1,7 @@
 # oci-util
 
+Internal workspace support for `oci-lib`; this crate is not published on its own.
+
 Shared Rust helpers for OCI tooling, independent of the builder and runner
 engines. This is a library-only crate. It depends on serde and the signature
 crates it needs for Notary envelopes. It does not speak HTTP, and it does not

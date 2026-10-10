@@ -21,7 +21,15 @@ pub(crate) fn lines_from_attestation(json: &str) -> Vec<String> {
         Ok(attestation) => attestation,
         Err(err) => return vec![format!("[fail] embedded guest attestation: {err}")],
     };
-    let mut lines = Vec::with_capacity(2 + attestation.members.len());
+    let mut lines = Vec::with_capacity(4 + attestation.members.len());
+    lines.push(format!(
+        "[ok] embedded guest package {} {}",
+        attestation.package, attestation.package_version
+    ));
+    lines.push(format!(
+        "[ok] embedded guest protocol version {}",
+        attestation.protocol_version
+    ));
     lines.push(format!(
         "[ok] embedded guest kernel sha256 {}",
         attestation.kernel_sha256
@@ -43,7 +51,9 @@ mod tests {
     #[test]
     fn diagnose_lists_hashes_then_member_paths_in_order() {
         let json = r#"{
-            "package": "oci-builder",
+            "package": "oci-runner",
+            "package_version": "0.1.9",
+            "protocol_version": 2,
             "kernel_sha256": "abc123",
             "initramfs_sha256": "def456",
             "members": [
@@ -54,6 +64,8 @@ mod tests {
         assert_eq!(
             lines_from_attestation(json),
             vec![
+                "[ok] embedded guest package oci-runner 0.1.9".to_string(),
+                "[ok] embedded guest protocol version 2".to_string(),
                 "[ok] embedded guest kernel sha256 abc123".to_string(),
                 "[ok] embedded guest initramfs sha256 def456".to_string(),
                 "[ok] initramfs member bin".to_string(),
@@ -64,11 +76,13 @@ mod tests {
 
     #[test]
     fn an_empty_member_list_prints_only_the_hashes() {
-        let json = r#"{"package":"oci-builder","kernel_sha256":"aa","initramfs_sha256":"bb","members":[]}"#;
+        let json = r#"{"package":"oci-runner","package_version":"0.1.9","protocol_version":2,"kernel_sha256":"aa","initramfs_sha256":"bb","members":[]}"#;
         let lines = lines_from_attestation(json);
         assert_eq!(
             lines,
             vec![
+                "[ok] embedded guest package oci-runner 0.1.9".to_string(),
+                "[ok] embedded guest protocol version 2".to_string(),
                 "[ok] embedded guest kernel sha256 aa".to_string(),
                 "[ok] embedded guest initramfs sha256 bb".to_string(),
             ]

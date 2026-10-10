@@ -42,23 +42,56 @@ pub(crate) fn hashes_match(
     Ok(())
 }
 
+pub(crate) fn compatibility_match(
+    attestation: &Attestation,
+    package: &str,
+    package_version: &str,
+    protocol_version: u32,
+) -> Result<(), String> {
+    if attestation.package != package {
+        return Err(format!(
+            "guest package {} does not match host package {package}",
+            attestation.package
+        ));
+    }
+    if attestation.package_version != package_version {
+        return Err(format!(
+            "guest package version {} does not match host version {package_version}",
+            attestation.package_version
+        ));
+    }
+    if attestation.protocol_version != protocol_version {
+        return Err(format!(
+            "guest protocol version {} does not match host protocol version {protocol_version}",
+            attestation.protocol_version
+        ));
+    }
+    Ok(())
+}
+
 /// Document written when the published release has no attestation asset.
 ///
 /// Releases through 0.1.7 shipped `SHA256SUMS` only. The member list is empty
 /// because those bytes were not recorded.
+#[cfg(test)]
 pub(crate) fn minimal_attestation(
     package: &str,
+    package_version: &str,
+    protocol_version: u32,
     kernel_sha256: &str,
     initramfs_sha256: &str,
 ) -> String {
     format!(
-        "{{\n  \"package\": {package},\n  \"kernel_sha256\": {kernel},\n  \"initramfs_sha256\": {initramfs},\n  \"members\": []\n}}\n",
+        "{{\n  \"package\": {package},\n  \"package_version\": {package_version},\n  \"protocol_version\": {protocol_version},\n  \"kernel_sha256\": {kernel},\n  \"initramfs_sha256\": {initramfs},\n  \"members\": []\n}}\n",
         package = json_string(package),
+        package_version = json_string(package_version),
+        protocol_version = protocol_version,
         kernel = json_string(kernel_sha256),
         initramfs = json_string(initramfs_sha256),
     )
 }
 
+#[cfg(test)]
 fn json_string(value: &str) -> String {
     let mut out = String::from("\"");
     for ch in value.chars() {
@@ -120,7 +153,7 @@ mod tests {
 
     #[test]
     fn hashes_must_match_the_files_case_insensitively() {
-        let json = minimal_attestation("oci-builder", "AbC", "def");
+        let json = minimal_attestation("oci-runner", "0.1.9", 2, "AbC", "def");
         let attestation = parse(&json).unwrap();
         assert!(attestation.members.is_empty());
         hashes_match(&attestation, "abc", "DEF").unwrap();
@@ -133,11 +166,22 @@ mod tests {
     #[test]
     fn an_empty_member_path_is_rejected() {
         let attestation = Attestation {
+            package: "oci-runner".into(),
+            package_version: "0.1.9".into(),
+            protocol_version: 2,
             kernel_sha256: "abc".into(),
             initramfs_sha256: "def".into(),
             members: vec!["".into()],
         };
         let err = hashes_match(&attestation, "abc", "def").unwrap_err();
         assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn compatibility_rejects_a_different_protocol() {
+        let json = minimal_attestation("oci-runner", "0.1.9", 1, "abc", "def");
+        let attestation = parse(&json).unwrap();
+        let err = compatibility_match(&attestation, "oci-runner", "0.1.9", 2).unwrap_err();
+        assert!(err.contains("protocol version"), "{err}");
     }
 }

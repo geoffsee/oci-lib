@@ -8,6 +8,8 @@
 
 use std::io::{self, Read, Write};
 
+pub use crate::protocol_version::PROTOCOL_VERSION;
+
 /// Guest virtio-vsock port the agent listens on. The host connects to it.
 pub const VSOCK_PORT: u32 = 5252;
 
@@ -21,14 +23,21 @@ const HOST_PUSH: u8 = 4;
 const HOST_DIAGNOSE: u8 = 5;
 const HOST_CANCEL: u8 = 6;
 const HOST_SHUTDOWN: u8 = 7;
+const HOST_HELLO: u8 = 8;
 
 const GUEST_LOG: u8 = 1;
 const GUEST_RESULT: u8 = 2;
 const GUEST_ERROR: u8 = 3;
+const GUEST_HELLO: u8 = 4;
 
 /// Host to guest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostFrame {
+    /// Negotiate the host/guest wire protocol before any other frame.
+    Hello {
+        /// Protocol version required by the host.
+        protocol: u32,
+    },
     /// Initialize process-wide storage configuration.
     Init(Init),
     /// Build an image from a Dockerfile and context.
@@ -143,6 +152,11 @@ pub struct Push {
 /// Guest to host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestFrame {
+    /// Response to the host's protocol negotiation frame.
+    Hello {
+        /// Protocol version implemented by the guest.
+        protocol: u32,
+    },
     /// Streaming log or progress line.
     Log {
         /// Log stream identifier (0=Progress, 1=Info, 2=Warn, 3=Error).
@@ -225,6 +239,10 @@ fn read_body(reader: &mut impl Read) -> io::Result<Vec<u8>> {
 fn encode_host(frame: &HostFrame) -> Vec<u8> {
     let mut w = Buf::new();
     match frame {
+        HostFrame::Hello { protocol } => {
+            w.u8(HOST_HELLO);
+            w.u32(*protocol);
+        }
         HostFrame::Init(init) => {
             w.u8(HOST_INIT);
             w.str(&init.storage_root);
@@ -286,6 +304,10 @@ fn encode_host(frame: &HostFrame) -> Vec<u8> {
 fn encode_guest(frame: &GuestFrame) -> Vec<u8> {
     let mut w = Buf::new();
     match frame {
+        GuestFrame::Hello { protocol } => {
+            w.u8(GUEST_HELLO);
+            w.u32(*protocol);
+        }
         GuestFrame::Log { stream, message } => {
             w.u8(GUEST_LOG);
             w.u8(*stream);
@@ -318,6 +340,7 @@ fn encode_guest(frame: &GuestFrame) -> Vec<u8> {
 fn decode_host(body: &[u8]) -> io::Result<HostFrame> {
     let mut r = Cursor::new(body);
     let frame = match r.u8()? {
+        HOST_HELLO => HostFrame::Hello { protocol: r.u32()? },
         HOST_INIT => HostFrame::Init(Init {
             storage_root: r.str()?,
             run_root: r.str()?,
@@ -374,6 +397,7 @@ fn decode_host(body: &[u8]) -> io::Result<HostFrame> {
 fn decode_guest(body: &[u8]) -> io::Result<GuestFrame> {
     let mut r = Cursor::new(body);
     let frame = match r.u8()? {
+        GUEST_HELLO => GuestFrame::Hello { protocol: r.u32()? },
         GUEST_LOG => GuestFrame::Log {
             stream: r.u8()?,
             message: r.str()?,
@@ -572,6 +596,9 @@ mod tests {
 
     #[test]
     fn host_frames_roundtrip() {
+        roundtrip_host(HostFrame::Hello {
+            protocol: PROTOCOL_VERSION,
+        });
         roundtrip_host(HostFrame::Init(Init {
             storage_root: "/mnt/root".into(),
             run_root: "/mnt/runroot".into(),
@@ -623,6 +650,9 @@ mod tests {
 
     #[test]
     fn guest_frames_roundtrip() {
+        roundtrip_guest(GuestFrame::Hello {
+            protocol: PROTOCOL_VERSION,
+        });
         roundtrip_guest(GuestFrame::Log {
             stream: LOG_WARN,
             message: "pulling\n".into(),

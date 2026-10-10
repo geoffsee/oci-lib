@@ -95,6 +95,8 @@ mod guest {
     mod attest;
     #[path = "../src/guest_check.rs"]
     mod check;
+    #[path = "../src/protocol_version.rs"]
+    mod protocol_version;
 
     /// Copy the Linux guest into OUT_DIR so macos.rs can `include_bytes!` it.
     /// The macOS binary only boots these embedded bytes, so a build without a
@@ -113,7 +115,9 @@ mod guest {
 
         let kernel_dest = out_dir.join("rob-guest-vmlinuz.zst");
         let initrd_dest = out_dir.join("rob-guest-initramfs.zst");
-        let (kernel, initrd, attestation) = guest_sources(manifest, out_dir)?;
+        let package = env::var("CARGO_PKG_NAME").map_err(|e| e.to_string())?;
+        let version = env::var("CARGO_PKG_VERSION").map_err(|e| e.to_string())?;
+        let (kernel, initrd, attestation) = guest_sources(manifest, out_dir, &package, &version)?;
         println!("cargo:rerun-if-changed={}", kernel.display());
         println!("cargo:rerun-if-changed={}", initrd.display());
         let kernel_bytes =
@@ -149,12 +153,15 @@ mod guest {
     fn guest_sources(
         manifest: &Path,
         out_dir: &Path,
+        package: &str,
+        version: &str,
     ) -> Result<(PathBuf, PathBuf, String), String> {
         match (env::var("ROB_GUEST_KERNEL"), env::var("ROB_GUEST_INITRD")) {
             (Ok(kernel), Ok(initrd)) => {
                 let pair = (PathBuf::from(kernel), PathBuf::from(initrd));
                 if pair.0.is_file() && pair.1.is_file() {
-                    let attestation = require_local_attestation(&pair.0, &pair.1)?;
+                    let attestation =
+                        require_local_attestation(&pair.0, &pair.1, package, version)?;
                     return Ok((pair.0, pair.1, attestation));
                 }
                 return Err(format!(
@@ -171,7 +178,7 @@ mod guest {
         let dir = manifest.join("guest/out");
         let pair = (dir.join("vmlinuz"), dir.join("initramfs"));
         if pair.0.is_file() && pair.1.is_file() {
-            let attestation = require_local_attestation(&pair.0, &pair.1)?;
+            let attestation = require_local_attestation(&pair.0, &pair.1, package, version)?;
             return Ok((pair.0, pair.1, attestation));
         }
         cached_guest(out_dir)
@@ -236,16 +243,16 @@ mod guest {
             println!("cargo:rerun-if-changed={}", path.display());
             let json = std::fs::read_to_string(&path)
                 .map_err(|err| format!("reading {}: {err}", path.display()))?;
-            accept_attestation(&json, &kernel, &initrd).map_err(|err| {
+            accept_attestation(&json, &kernel, &initrd, &package, &version).map_err(|err| {
                 format!(
                     "{err}; refusing to embed a guest whose attestation does not match the downloaded files"
                 )
             })?;
             json
         } else {
-            // 0.1.7 and earlier published no attestation asset. Keep the
-            // SHA256SUMS check above and record the hashes of the files we embed.
-            check::minimal_attestation(&package, &sha256(&kernel)?, &sha256(&initrd)?)
+            return Err(format!(
+                "release guest v{version} has no compatibility attestation; refusing to embed it"
+            ));
         };
         Ok((kernel, initrd, attestation))
     }
@@ -253,7 +260,12 @@ mod guest {
     /// `attestation.json` sits next to the initramfs. A missing file or a hash
     /// that does not match the blobs on disk means the guest was not built by
     /// the current xtask.
-    fn require_local_attestation(kernel: &Path, initrd: &Path) -> Result<String, String> {
+    fn require_local_attestation(
+        kernel: &Path,
+        initrd: &Path,
+        package: &str,
+        version: &str,
+    ) -> Result<String, String> {
         let attestation = match initrd.parent() {
             Some(dir) if !dir.as_os_str().is_empty() => dir.join("attestation.json"),
             _ => PathBuf::from("attestation.json"),
@@ -267,14 +279,26 @@ mod guest {
         println!("cargo:rerun-if-changed={}", attestation.display());
         let json = std::fs::read_to_string(&attestation)
             .map_err(|err| format!("reading {}: {err}", attestation.display()))?;
-        accept_attestation(&json, kernel, initrd)
+        accept_attestation(&json, kernel, initrd, package, version)
             .map_err(|err| format!("{err}; rerun `cargo xtask guest`"))?;
         Ok(json)
     }
 
-    fn accept_attestation(json: &str, kernel: &Path, initrd: &Path) -> Result<(), String> {
+    fn accept_attestation(
+        json: &str,
+        kernel: &Path,
+        initrd: &Path,
+        package: &str,
+        version: &str,
+    ) -> Result<(), String> {
         let attestation = attest::parse(json)?;
-        check::hashes_match(&attestation, &sha256(kernel)?, &sha256(initrd)?)
+        check::hashes_match(&attestation, &sha256(kernel)?, &sha256(initrd)?)?;
+        check::compatibility_match(
+            &attestation,
+            package,
+            version,
+            protocol_version::PROTOCOL_VERSION,
+        )
     }
 
     fn release_asset_sha(release: &str, dir: &Path, asset: &str) -> Result<String, String> {

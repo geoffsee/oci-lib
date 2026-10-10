@@ -1,10 +1,6 @@
-# Trusted publishing. On crates.io, each crate's Settings → Trusted Publishing
-# GitHub entry must use workflow filename release.yml and environment release.
-# The first version of a crate still has to be uploaded with an API token.
-# Later versions are published by pushing a vX.Y.Z tag that matches
-# workspace.package.version. No long-lived token lives in GitHub secrets;
-# rust-lang/crates-io-auth-action exchanges OIDC for a short-lived token
-# passed to cargo publish as CARGO_REGISTRY_TOKEN (see crates.io docs).
+# A tagged oci-lib release builds and publishes the CLI archives and their
+# matching Linux guest artifacts. `oci-util` is an internal workspace crate;
+# it is deliberately not a crates.io release target.
 name: Release
 
 on:
@@ -25,62 +21,6 @@ concurrency:
 jobs:
   test:
     uses: ./.github/workflows/ci.yml
-
-  publish:
-    name: publish to crates.io
-    needs: test
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - uses: actions/setup-go@v7
-        with:
-          go-version: "1.26"
-          cache: false
-      - name: Install build tools
-        run: sudo apt-get update && sudo apt-get install -y gcc pkg-config libseccomp-dev
-      - name: Require the tag to match the crate versions
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$tag" = "$GITHUB_REF_NAME" ]; then
-            echo "ref ${GITHUB_REF_NAME} is not a v* tag" >&2
-            exit 1
-          fi
-          python3 - "$tag" << 'PY'
-          import json, subprocess, sys
-          tag = sys.argv[1]
-          meta = json.loads(subprocess.check_output([
-              "cargo", "metadata", "--format-version", "1", "--no-deps", "--locked",
-          ]))
-          want = {"oci-builder", "oci-runner"}
-          found = {pkg["name"]: pkg["version"] for pkg in meta["packages"] if pkg["name"] in want}
-          missing = want - set(found)
-          if missing:
-              raise SystemExit(f"missing packages in metadata: {sorted(missing)}")
-          for name, version in sorted(found.items()):
-              if version != tag:
-                  raise SystemExit(f"{name} is {version}, tag is v{tag}")
-          print(f"tag v{tag} matches oci-builder and oci-runner")
-          PY
-      - uses: rust-lang/crates-io-auth-action@v1
-        id: auth
-      - name: Publish oci-util
-        run: bash .github/workflows/publish-crate.sh oci-util
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-      - name: Publish oci-builder
-        run: bash .github/workflows/publish-crate.sh oci-builder
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-      - name: Publish oci-runner
-        run: bash .github/workflows/publish-crate.sh oci-runner
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
   linux-binaries:
     name: ${{ matrix.target }}
@@ -157,6 +97,29 @@ jobs:
         if: matrix.guest
         run: |
           cargo xtask guest oci-builder oci-runner
+      - name: Validate guest compatibility metadata
+        if: matrix.guest
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+
+          expected_version = pathlib.Path("Cargo.toml").read_text().split('version = "', 1)[1].split('"', 1)[0]
+          for package in ("oci-builder", "oci-runner"):
+              root = pathlib.Path("crates") / package / "guest" / "out"
+              document = json.loads((root / "attestation.json").read_text())
+              if document.get("package") != package:
+                  raise SystemExit(f"{package}: attestation package is {document.get('package')!r}")
+              if document.get("package_version") != expected_version:
+                  raise SystemExit(
+                      f"{package}: attestation version is {document.get('package_version')!r}, expected {expected_version!r}"
+                  )
+              if document.get("protocol_version") != 2:
+                  raise SystemExit(f"{package}: unsupported guest protocol {document.get('protocol_version')!r}")
+              actual = hashlib.sha256((root / "initramfs").read_bytes()).hexdigest()
+              if document.get("initramfs_sha256") != actual:
+                  raise SystemExit(f"{package}: initramfs hash does not match attestation")
+          PY
       - uses: actions/upload-artifact@v4
         if: matrix.guest
         with:
@@ -208,6 +171,8 @@ jobs:
             "$bin" --help >/dev/null
             cp "$bin" "dist/$bin_name"
           done
+          ./target/release/oci-builder diagnose >/dev/null
+          ./target/release/oci-runner diagnose >/dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: aarch64-apple-darwin
@@ -215,7 +180,7 @@ jobs:
 
   github-release:
     name: publish binary archives
-    needs: [publish, linux-binaries, macos-binary]
+    needs: [test, linux-binaries, macos-binary]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -9,7 +9,7 @@
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicPtr, Ordering};
@@ -42,6 +42,7 @@ use crate::error::{Error, ErrorCode};
 use crate::shares::{Export, ShareRequest, guest_path, plan_shares};
 
 const BOOT_TIMEOUT: Duration = Duration::from_secs(30);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Shared {
     jobs: std::sync::mpsc::Sender<Job>,
@@ -685,6 +686,13 @@ fn exchange(
                 message,
                 detail,
             } => return Err(Error::new(ErrorCode::from_raw(code), message, detail)),
+            GuestFrame::Hello { protocol } => {
+                return Err(Error::new(
+                    ErrorCode::Prerequisite,
+                    "unexpected guest protocol hello",
+                    format!("guest reported protocol version {protocol} after negotiation"),
+                ));
+            }
         }
     }
 }
@@ -767,13 +775,93 @@ fn boot(
     let read = unsafe { File::from(OwnedFd::from_raw_fd(fd)) };
     let write_file = unsafe { File::from(OwnedFd::from_raw_fd(write_fd)) };
     *write.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(write_file);
-    Ok(Guest {
+    let mut started = Guest {
         vm,
         queue,
         _console: console,
         read,
         exports: exports.to_vec(),
-    })
+    };
+    if let Err(err) = handshake(&mut started.read, write) {
+        started.stop();
+        *write.lock().unwrap_or_else(|poison| poison.into_inner()) = None;
+        return Err(err);
+    }
+    Ok(started)
+}
+
+fn handshake(read: &mut File, write: &Arc<Mutex<Option<File>>>) -> Result<(), Error> {
+    write_locked(
+        write,
+        &HostFrame::Hello {
+            protocol: rob_proto::PROTOCOL_VERSION,
+        },
+    )?;
+    wait_readable(read, HANDSHAKE_TIMEOUT).map_err(|err| {
+        Error::new(
+            ErrorCode::Prerequisite,
+            "guest protocol handshake failed",
+            format!(
+                "host expects protocol version {}; the embedded guest did not respond: {err}. Rebuild the guest with `cargo xtask guest`.",
+                rob_proto::PROTOCOL_VERSION
+            ),
+        )
+    })?;
+    match read_guest_frame(read) {
+        Ok(GuestFrame::Hello { protocol }) if protocol == rob_proto::PROTOCOL_VERSION => Ok(()),
+        Ok(GuestFrame::Hello { protocol }) => Err(Error::new(
+            ErrorCode::Prerequisite,
+            "guest protocol mismatch",
+            format!(
+                "host expects protocol version {}, guest implements {protocol}; rebuild the guest with `cargo xtask guest`",
+                rob_proto::PROTOCOL_VERSION
+            ),
+        )),
+        Ok(GuestFrame::Error {
+            code,
+            message,
+            detail,
+        }) => Err(Error::new(ErrorCode::from_raw(code), message, detail)),
+        Ok(frame) => Err(Error::new(
+            ErrorCode::Prerequisite,
+            "guest protocol handshake failed",
+            format!("expected a protocol hello, received {frame:?}"),
+        )),
+        Err(err) => Err(Error::new(
+            ErrorCode::Prerequisite,
+            "guest protocol handshake failed",
+            format!(
+                "host expects protocol version {}; guest closed or rejected the handshake: {err}. Rebuild the guest with `cargo xtask guest`.",
+                rob_proto::PROTOCOL_VERSION
+            ),
+        )),
+    }
+}
+
+fn wait_readable(file: &File, timeout: Duration) -> io::Result<()> {
+    let mut poll = libc::pollfd {
+        fd: file.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    let result = unsafe { libc::poll(&mut poll, 1, millis) };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if result == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "timed out waiting for guest protocol handshake",
+        ));
+    }
+    if poll.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "guest socket closed during protocol handshake",
+        ));
+    }
+    Ok(())
 }
 
 fn connect_vsock(vm_ptr: usize, queue: &DispatchQueue) -> Result<c_int, Error> {

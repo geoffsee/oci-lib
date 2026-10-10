@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use oci_builder::proto::{
-    Build, GuestFrame, HostFrame, Init, Push, VSOCK_PORT, read_host_frame, write_guest_frame,
+    Build, GuestFrame, HostFrame, Init, PROTOCOL_VERSION, Push, VSOCK_PORT, read_host_frame,
+    write_guest_frame,
 };
 
 use oci_builder::{
@@ -27,9 +28,10 @@ struct Tokens {
 pub fn engine_serve() -> Result<(), Error> {
     let listener = vsock_listen(VSOCK_PORT)
         .map_err(|err| Error::new(ErrorCode::Prerequisite, format!("vsock listen: {err}"), ""))?;
-    let client = vsock_accept(&listener)
+    let mut client = vsock_accept(&listener)
         .map_err(|err| Error::new(ErrorCode::Internal, format!("vsock accept: {err}"), ""))?;
     drop(listener);
+    negotiate(&mut client)?;
     let read = Arc::new(Mutex::new(client.try_clone().map_err(|err| {
         Error::new(ErrorCode::Internal, format!("vsock clone: {err}"), "")
     })?));
@@ -41,14 +43,23 @@ pub fn engine_serve() -> Result<(), Error> {
     let (tx, rx) = std::sync::mpsc::channel();
     let tokens_reader = Arc::clone(&tokens);
     let read_thread = Arc::clone(&read);
+    let write_thread = Arc::clone(&write);
     thread::Builder::new()
         .name("oci-builder-vsock".into())
-        .spawn(move || reader(read_thread, tokens_reader, tx))
+        .spawn(move || reader(read_thread, write_thread, tokens_reader, tx))
         .map_err(|err| Error::new(ErrorCode::Internal, format!("vsock reader: {err}"), ""))?;
 
     let mut builder: Option<Builder> = None;
     while let Ok(frame) = rx.recv() {
         match frame {
+            HostFrame::Hello { .. } => {
+                let response = error_frame(&Error::new(
+                    ErrorCode::InvalidArgument,
+                    "guest protocol handshake already completed",
+                    "",
+                ));
+                write_frame(&write, &response)?;
+            }
             HostFrame::Init(init) => {
                 let response = match open_builder(&mut builder, &init) {
                     Ok(()) => empty_result(),
@@ -122,6 +133,7 @@ pub fn engine_serve() -> Result<(), Error> {
 
 fn reader(
     read: Arc<Mutex<File>>,
+    write: Arc<Mutex<File>>,
     tokens: Arc<Mutex<Tokens>>,
     tx: std::sync::mpsc::Sender<HostFrame>,
 ) {
@@ -130,7 +142,20 @@ fn reader(
             let mut file = read.lock().unwrap_or_else(|poison| poison.into_inner());
             match read_host_frame(&mut *file) {
                 Ok(frame) => frame,
-                Err(_) => break,
+                Err(err) => {
+                    let detail = format!(
+                        "failed to decode a host frame: {err}; host and guest protocol versions may differ (guest protocol version {PROTOCOL_VERSION})"
+                    );
+                    let _ = write_frame(
+                        &write,
+                        &GuestFrame::Error {
+                            code: ErrorCode::InvalidArgument.as_exit(),
+                            message: "guest protocol mismatch".into(),
+                            detail,
+                        },
+                    );
+                    break;
+                }
             }
         };
         if let HostFrame::Cancel { token } = frame {
@@ -139,6 +164,68 @@ fn reader(
         }
         if tx.send(frame).is_err() {
             break;
+        }
+    }
+}
+
+fn negotiate(client: &mut File) -> Result<(), Error> {
+    let frame = match read_host_frame(client) {
+        Ok(frame) => frame,
+        Err(err) => {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "guest protocol handshake failed",
+                format!("could not decode the host handshake: {err}"),
+            ));
+        }
+    };
+    match frame {
+        HostFrame::Hello { protocol } if protocol == PROTOCOL_VERSION => write_guest_frame(
+            client,
+            &GuestFrame::Hello {
+                protocol: PROTOCOL_VERSION,
+            },
+        )
+        .map_err(|err| {
+            Error::new(
+                ErrorCode::Internal,
+                "guest protocol handshake failed",
+                err.to_string(),
+            )
+        }),
+        HostFrame::Hello { protocol } => {
+            let detail = format!(
+                "host requested protocol version {protocol}, guest implements {PROTOCOL_VERSION}"
+            );
+            let _ = write_guest_frame(
+                client,
+                &GuestFrame::Error {
+                    code: ErrorCode::InvalidArgument.as_exit(),
+                    message: "guest protocol mismatch".into(),
+                    detail: detail.clone(),
+                },
+            );
+            Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "guest protocol mismatch",
+                detail,
+            ))
+        }
+        other => {
+            let detail = format!("expected a protocol handshake, received {other:?}");
+            let _ = write_guest_frame(
+                client,
+                &GuestFrame::Error {
+                    code: ErrorCode::InvalidArgument.as_exit(),
+                    message: "guest protocol handshake required".into(),
+                    detail: detail.clone(),
+                },
+            );
+            Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "guest protocol handshake required",
+                detail,
+            ))
         }
     }
 }

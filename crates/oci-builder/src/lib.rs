@@ -51,6 +51,7 @@ mod ignore;
 mod macos;
 mod notary;
 mod policy;
+mod protocol_version;
 mod registry;
 #[cfg(any(rob_vm, test))]
 mod shares;

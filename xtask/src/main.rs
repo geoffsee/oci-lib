@@ -19,6 +19,9 @@ use sha2::{Digest, Sha256};
 
 mod guest;
 
+#[path = "../../crates/oci-builder/src/protocol_version.rs"]
+mod protocol_version;
+
 const PACKAGES: [&str; 2] = ["oci-builder", "oci-runner"];
 const KERNEL_RELEASE: &str = "https://github.com/arcboxlabs/kernel/releases/download/v0.0.25";
 const BUSYBOX: &str = "busybox-1.36.1";
@@ -62,6 +65,7 @@ fn guest(packages: &[String]) -> Result<()> {
     }
 
     let root = workspace_root();
+    let package_version = workspace_version(&root)?;
     let target_dir = env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("target"));
@@ -108,6 +112,8 @@ fn guest(packages: &[String]) -> Result<()> {
         let attestation = out.join("attestation.json");
         let json = attestation_json(
             package,
+            &package_version,
+            protocol_version::PROTOCOL_VERSION,
             &sha256(&vmlinuz)?,
             &sha256_bytes(&gz_bytes),
             &archive.entries,
@@ -122,6 +128,17 @@ fn guest(packages: &[String]) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn workspace_version(root: &Path) -> Result<String> {
+    let cargo = fs::read_to_string(root.join("Cargo.toml"))
+        .map_err(|err| format!("reading workspace Cargo.toml: {err}"))?;
+    cargo
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("version = \"")?.strip_suffix('"'))
+        .map(str::to_string)
+        .ok_or_else(|| "workspace Cargo.toml has no package version".into())
 }
 
 fn workspace_root() -> PathBuf {
@@ -371,12 +388,19 @@ fn hex_digest(bytes: impl AsRef<[u8]>) -> String {
 /// `mode` keeps the file-type bits stored on the cpio entry.
 fn attestation_json(
     package: &str,
+    package_version: &str,
+    protocol_version: u32,
     kernel_sha256: &str,
     initramfs_sha256: &str,
     entries: &BTreeMap<String, (u32, Vec<u8>)>,
 ) -> String {
     let mut out = String::from("{\n");
     out.push_str(&format!("  \"package\": {},\n", json_string(package)));
+    out.push_str(&format!(
+        "  \"package_version\": {},\n",
+        json_string(package_version)
+    ));
+    out.push_str(&format!("  \"protocol_version\": {protocol_version},\n"));
     out.push_str(&format!(
         "  \"kernel_sha256\": {},\n",
         json_string(kernel_sha256)
@@ -573,6 +597,8 @@ mod tests {
         archive.file("a/b", 0o755, b"hello".to_vec());
         let json = attestation_json(
             "oci-runner",
+            "0.1.9",
+            2,
             "kernelhash",
             "initramfshash",
             &archive.entries,
@@ -605,7 +631,7 @@ mod tests {
     fn attestation_escapes_member_paths() {
         let mut entries = BTreeMap::new();
         entries.insert("a\"b\\c".to_string(), (0o644, b"x".to_vec()));
-        let json = attestation_json("oci-builder", "k", "i", &entries);
+        let json = attestation_json("oci-builder", "0.1.9", 2, "k", "i", &entries);
         let escaped = json_string("a\"b\\c");
         assert_eq!(escaped, "\"a\\\"b\\\\c\"");
         assert!(json.contains(&format!("\"path\": {escaped}")));
