@@ -44,6 +44,8 @@ mod config;
 mod entitlement;
 mod error;
 mod ffi;
+#[cfg(any(rob_vm, test))]
+mod guest_record;
 #[cfg(rob_vm)]
 mod macos;
 #[cfg(any(rob_vm, test))]

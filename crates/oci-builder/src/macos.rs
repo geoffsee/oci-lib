@@ -258,6 +258,9 @@ pub(crate) fn diagnose() -> Result<String, Error> {
             }
         }
     }
+    lines.extend(crate::guest_record::lines_from_attestation(
+        EMBEDDED_ATTESTATION,
+    ));
     let status = if blocked { "blocked" } else { "ready" };
     let mut report = format!("status: {status}\n");
     report.push_str(&lines.join("\n"));
@@ -946,6 +949,8 @@ fn ns_error_text(err: &NSError) -> String {
 
 const EMBEDDED_KERNEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rob-guest-vmlinuz.zst"));
 const EMBEDDED_INITRD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rob-guest-initramfs.zst"));
+const EMBEDDED_ATTESTATION: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/rob-guest-attestation.json"));
 
 /// The guest always boots from the images embedded at build time. They are
 /// written to the cache directory because the boot loader takes file URLs.

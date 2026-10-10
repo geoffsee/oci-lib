@@ -241,9 +241,12 @@ jobs:
             done
           done
           # macOS build.rs downloads these when guest/out is absent.
+          # guest/out/ is uploaded whole, so attestation.json is already in the artifact.
           cp artifacts/guest-aarch64-builder/initramfs "packages/oci-builder-${version}-aarch64-initramfs"
           cp artifacts/guest-aarch64-runner/initramfs "packages/oci-runner-${version}-aarch64-initramfs"
-          (cd packages && sha256sum ./*.tar.gz ./*-initramfs > SHA256SUMS)
+          cp artifacts/guest-aarch64-builder/attestation.json "packages/oci-builder-${version}-aarch64-guest-attestation.json"
+          cp artifacts/guest-aarch64-runner/attestation.json "packages/oci-runner-${version}-aarch64-guest-attestation.json"
+          (cd packages && sha256sum ./*.tar.gz ./*-initramfs ./*-guest-attestation.json > SHA256SUMS)
       - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -258,7 +261,7 @@ jobs:
             printf '%s\n' \
               "## Binaries" \
               "" \
-              "Archives contain \`oci-builder\` and \`oci-runner\`. The Apple Silicon binaries embed the zstd-compressed Linux kernel and initramfs and write them to the cache directory on first use. The \`*-initramfs\` assets are what macOS builds from source download when \`guest/out\` is absent. Linux binaries are built on Ubuntu 24.04 and need that glibc plus \`libseccomp.so.2\`." \
+              "Archives contain \`oci-builder\` and \`oci-runner\`. The Apple Silicon binaries embed the zstd-compressed Linux kernel and initramfs and write them to the cache directory on first use. The \`*-initramfs\` assets are what macOS builds from source download when \`guest/out\` is absent. The \`*-guest-attestation.json\` assets are the kernel, initramfs, and initramfs member hashes for that guest. Linux binaries are built on Ubuntu 24.04 and need that glibc plus \`libseccomp.so.2\`." \
               ""
             gh api --method POST \
               -H "Accept: application/vnd.github+json" \

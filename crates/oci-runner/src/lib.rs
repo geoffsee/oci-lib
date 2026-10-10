@@ -36,6 +36,8 @@ pub use proto as ror_proto;
 mod entitlement;
 mod error;
 mod ffi;
+#[cfg(any(ror_vm, test))]
+mod guest_record;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(ror_vm)]
