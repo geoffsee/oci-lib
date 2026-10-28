@@ -6,6 +6,7 @@ package main
 
 import (
 	"github.com/moby/sys/devices"
+	runtimeAppArmor "github.com/opencontainers/runc/libcontainer/apparmor"
 	"go.podman.io/common/pkg/apparmor"
 	"os"
 	"path/filepath"
@@ -54,6 +55,10 @@ func applySecurity(spec *specs.Spec) error {
 			}
 		}
 		return nil
+	}
+	if spec.Process.ApparmorProfile == "unconfined" && !runtimeAppArmor.IsEnabled() {
+		// On hosts without AppArmor there is no kernel profile to transition.
+		spec.Process.ApparmorProfile = ""
 	}
 	if profile := spec.Process.ApparmorProfile; profile != "" && profile != "unconfined" {
 		if !apparmor.IsEnabled() {

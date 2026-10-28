@@ -216,6 +216,8 @@ func opStart(req *opRequest, hooks *ioHooks) (retErr error) {
 		Init:          true,
 		ConsoleWidth:  0,
 		ConsoleHeight: 0,
+		// specconv leaves AppArmor to the caller's per-process configuration.
+		AppArmorProfile: spec.Process.ApparmorProfile,
 	}
 	process.UID = int(spec.Process.User.UID)
 	process.GID = int(spec.Process.User.GID)
@@ -640,6 +642,7 @@ func opExec(req *opRequest, hooks *ioHooks) (any, error) {
 	if spec != nil && spec.Process != nil {
 		process.Env = spec.Process.Env
 		process.Cwd = spec.Process.Cwd
+		process.AppArmorProfile = spec.Process.ApparmorProfile
 		process.UID = int(spec.Process.User.UID)
 		process.GID = int(spec.Process.User.GID)
 		for _, gid := range spec.Process.User.AdditionalGids {

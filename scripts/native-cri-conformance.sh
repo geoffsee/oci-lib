@@ -51,7 +51,7 @@ for tool in crictl critest; do "$engine" cp "$out/tools/$tool" "$name:/usr/local
 "$engine" exec -i "$name" sh -c 'cat > /etc/cni/net.d/10-test.conflist' <<'CNI'
 {"cniVersion":"1.0.0","name":"oci-conformance","plugins":[{"type":"bridge","bridge":"cri-test0","isGateway":true,"ipMasq":true,"ipam":{"type":"host-local","ranges":[[{"subnet":"10.87.0.0/24"}]],"routes":[{"dst":"0.0.0.0/0"}]}},{"type":"portmap","capabilities":{"portMappings":true}}]}
 CNI
-for script in cri-conformance repro-seccomp repro-coredns-start repro-threaded-init; do "$engine" cp "scripts/$script.sh" "$name:/usr/local/bin/$script"; done
+for script in cri-conformance repro-seccomp repro-apparmor repro-coredns-start repro-threaded-init; do "$engine" cp "scripts/$script.sh" "$name:/usr/local/bin/$script"; done
 # nsenter joins IPC below. Docker's private IPC namespaces cannot be joined
 # through --ipc=container unless the donor was created as shareable.
 "$engine" run -d --name "$client" --privileged --network "container:$name" --pid "container:$name" "$image" sleep infinity >/dev/null
@@ -59,6 +59,7 @@ for script in cri-conformance repro-seccomp repro-coredns-start repro-threaded-i
     for attempt in $(seq 1 60); do crictl --runtime-endpoint unix:///tmp/cri.sock info > /evidence/info.json 2>/dev/null && break; sleep 1; done
     test -s /evidence/info.json
     repro-seccomp /tmp/cri.sock /evidence/seccomp > /evidence/seccomp.log 2>&1
+    repro-apparmor /tmp/cri.sock /evidence/apparmor > /evidence/apparmor.log 2>&1
     repro-coredns-start /tmp/cri.sock /evidence/coredns > /evidence/coredns.log 2>&1
     repro-threaded-init /tmp/cri.sock /evidence/threaded > /evidence/threaded.log 2>&1
     cri-conformance /tmp/cri.sock --ginkgo.v --ginkgo.junit-report=/evidence/conformance.xml > /evidence/conformance.log 2>&1
