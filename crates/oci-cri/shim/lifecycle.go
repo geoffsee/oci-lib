@@ -7,6 +7,8 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -25,6 +27,8 @@ import (
 // restart via libcontainer.Load.
 
 type handle struct {
+	startMu   sync.Mutex
+	startErr  error
 	container *libcontainer.Container
 	process   *libcontainer.Process
 	stdin     io.WriteCloser
@@ -152,10 +156,26 @@ func opCreate(req *opRequest) error {
 	return nil
 }
 
-func opStart(req *opRequest, hooks *ioHooks) error {
+func opStart(req *opRequest, hooks *ioHooks) (retErr error) {
 	h, err := getHandle(req, req.ID)
 	if err != nil {
 		return err
+	}
+	h.startMu.Lock()
+	defer h.startMu.Unlock()
+	if h.startErr != nil {
+		return h.startErr
+	}
+	// Never tear down a previous successful start on a duplicate request.
+	if h.process != nil {
+		return fail(codeRun, "container has already been started", "")
+	}
+	status, err := h.container.Status()
+	if err != nil {
+		return fail(codeRun, "container status before start", err.Error())
+	}
+	if status != libcontainer.Stopped {
+		return fail(codeRun, "container is not stopped", status.String())
 	}
 	spec, err := savedSpec(req.StoreRoot, req.ID)
 	if err != nil {
@@ -164,6 +184,20 @@ func opStart(req *opRequest, hooks *ioHooks) error {
 	if spec.Process == nil {
 		return fail(codeInvalid, "spec has no process", "")
 	}
+	initStarted := false
+	startAttempted := false
+	defer func() {
+		if retErr == nil || !startAttempted {
+			return
+		}
+		// Runs after output writers have closed. Failed Start may leave
+		// initProcessStartTime set even after libcontainer reaps its child.
+		// Destroy and recreate the handle from its configuration before retry.
+		if cleanupErr := resetFailedStart(req, h, initStarted); cleanupErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("reset failed start: %w", cleanupErr))
+			h.startErr = retErr
+		}
+	}()
 	process := &libcontainer.Process{
 		Args:          spec.Process.Args,
 		Env:           spec.Process.Env,
@@ -214,16 +248,44 @@ func opStart(req *opRequest, hooks *ioHooks) error {
 		process.Stdout = os.Stdout
 		process.Stderr = os.Stderr
 	}
+	startAttempted = true
 	if err := h.container.Start(process); err != nil {
 		_ = stdinRead.Close()
 		return fail(codeRun, "start container", err.Error())
 	}
+	initStarted = true
+	h.process = process
 	if err := h.container.Exec(); err != nil {
 		return fail(codeRun, "exec container init", err.Error())
 	}
 	_ = stdinRead.Close()
 	h.process = process
 	started = true
+	return nil
+}
+
+// Keep the saved OCI spec and rootfs: CRI still owns a Created container.
+func resetFailedStart(req *opRequest, h *handle, initStarted bool) error {
+	config := h.container.Config()
+	if initStarted {
+		if err := h.container.Signal(syscall.SIGKILL); err != nil {
+			status, statusErr := h.container.Status()
+			if statusErr != nil || status != libcontainer.Stopped {
+				return err
+			}
+		}
+		_, _ = h.process.Wait()
+	}
+	if err := h.container.Destroy(); err != nil {
+		return err
+	}
+	h.pumps.Wait()
+	h.process = nil
+	container, err := libcontainer.Create(stateRootOf(req), req.ID, &config)
+	if err != nil {
+		return err
+	}
+	h.container = container
 	return nil
 }
 

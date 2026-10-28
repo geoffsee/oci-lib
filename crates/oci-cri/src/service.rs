@@ -425,6 +425,7 @@ impl RuntimeService for CriService {
             }
             let _ = inner.engine.remove_container(&record.infra_container_id);
             let _ = inner.engine.release_rootfs(&record.infra_container_id);
+            crate::dns::remove(&inner.config.root, &id)?;
             inner.store.remove_sandbox(&id)
         })
         .await
@@ -1143,9 +1144,8 @@ pub(crate) fn run_pod_sandbox_sync(
     let infra_id = new_id();
     let image = inner.ensure_image(&inner.config.sandbox_image)?;
     let rootfs = inner.engine.prepare_rootfs(&infra_id, &image.id)?;
-    if let Some(dns) = &config.dns_config {
-        write_resolv_conf(&rootfs, dns);
-    }
+    let mut resolver =
+        crate::dns::Resolver::create(&inner.config.root, &sandbox_id, config.dns_config.as_ref())?;
     let hostname = if config.hostname.is_empty() {
         metadata.name.clone()
     } else {
@@ -1157,6 +1157,7 @@ pub(crate) fn run_pod_sandbox_sync(
         image.spec.as_ref(),
         &hostname,
     )?;
+    let spec = crate::dns::mount(spec, &inner.config.root, &sandbox_id)?;
     inner.engine.create_container(&infra_id, &spec)?;
     let host_network = config
         .linux
@@ -1216,28 +1217,13 @@ pub(crate) fn run_pod_sandbox_sync(
         }
     }
     inner.store.put_sandbox(record)?;
+    resolver.commit();
     inner.spawn_monitor(infra_id);
     Ok(sandbox_id)
 }
 
 fn strip_cidr(ip: &str) -> &str {
     ip.split('/').next().unwrap_or(ip)
-}
-
-fn write_resolv_conf(rootfs: &std::path::Path, dns: &DnsConfig) {
-    let etc = rootfs.join("etc");
-    let _ = std::fs::create_dir_all(&etc);
-    let mut text = String::new();
-    for server in &dns.servers {
-        text.push_str(&format!("nameserver {server}\n"));
-    }
-    if !dns.searches.is_empty() {
-        text.push_str(&format!("search {}\n", dns.searches.join(" ")));
-    }
-    if !dns.options.is_empty() {
-        text.push_str(&format!("options {}\n", dns.options.join(" ")));
-    }
-    let _ = std::fs::write(etc.join("resolv.conf"), text);
 }
 
 pub(crate) fn stop_pod_sandbox_sync(inner: &Inner, id: &str) -> CrateResult<()> {
@@ -1335,6 +1321,7 @@ pub(crate) fn create_container_sync(
         &namespace_paths,
         &hostname,
     )?;
+    let spec_json = crate::dns::mount(spec_json, &inner.config.root, &sandbox.id)?;
     if let Err(err) = inner.engine.create_container(&id, &spec_json) {
         let _ = inner.engine.release_rootfs(&id);
         return Err(err);
@@ -2005,6 +1992,84 @@ echo '{"cniVersion":"1.0.0","ips":[{"address":"10.0.0.7/24"}]}'
                 );
             }
             assert!(!calls.contains("/proc/self/ns/net"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod dns_regressions {
+    use super::*;
+
+    #[tokio::test]
+    async fn workloads_mount_their_sandbox_dns_and_removal_cleans_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let service = CriService::open(
+            Config {
+                root: root.clone(),
+                state_root: dir.path().join("state"),
+                ..Default::default()
+            },
+            Arc::new(crate::test_support::FakeEngine::new(root)),
+        )
+        .unwrap();
+        let image = service.inner.ensure_image("fake/app:latest").unwrap();
+        for server in ["10.43.0.10", "10.44.0.10"] {
+            let pod = run_pod_sandbox_sync(
+                &service.inner,
+                RunPodSandboxRequest {
+                    config: Some(PodSandboxConfig {
+                        dns_config: Some(DnsConfig {
+                            servers: vec![server.into()],
+                            searches: vec!["default.svc.cluster.local".into()],
+                            options: vec!["ndots:5".into()],
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let id = create_container_sync(
+                &service.inner,
+                CreateContainerRequest {
+                    pod_sandbox_id: pod.clone(),
+                    config: Some(ContainerConfig {
+                        image: Some(ImageSpec {
+                            image: image.id.clone(),
+                            ..Default::default()
+                        }),
+                        command: vec!["sleep".into(), "30".into()],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let record = service.inner.container_record(&id).unwrap();
+            let spec: serde_json::Value = serde_json::from_str(&record.spec_json).unwrap();
+            let mounts: Vec<_> = spec["mounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|mount| mount["destination"] == "/etc/resolv.conf")
+                .collect();
+            assert_eq!(mounts.len(), 1);
+            let source = mounts[0]["source"].as_str().unwrap();
+            assert_ne!(source, "/etc/resolv.conf");
+            assert_eq!(
+                std::fs::read_to_string(source).unwrap(),
+                format!("nameserver {server}\nsearch default.svc.cluster.local\noptions ndots:5\n")
+            );
+            RuntimeService::remove_pod_sandbox(
+                &service,
+                Request::new(RemovePodSandboxRequest {
+                    pod_sandbox_id: pod,
+                }),
+            )
+            .await
+            .unwrap();
+            assert!(!std::path::Path::new(source).exists());
         }
     }
 }
