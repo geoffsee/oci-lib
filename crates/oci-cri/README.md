@@ -116,3 +116,21 @@ exist, keep `vm` opt-in so plain workspace builds stay green.
 MVP limits: CNI is disabled in the guest (sandboxes share the guest netns);
 Exec/Attach streaming URLs are not rewritten to the host, so kubelet streaming
 against a Mac-hosted socket is not supported yet.
+
+## Container startup and DNS
+
+Args-only CRI requests retain the image entrypoint; an explicit command replaces
+it. Unprivileged workloads start with the containers-common default capabilities
+(CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, NET_BIND_SERVICE, SETFCAP, SETGID,
+SETPCAP, SETUID, SYS_CHROOT). CRI additions and drops accept names with or without
+`CAP_`; `drop: ALL` clears defaults before explicit additions. Ambient requests
+are handled separately. Defaults do not include SYS_ADMIN or NET_RAW.
+
+Sandbox DNS settings are mounted from runtime-owned resolver files into each
+workload, rather than shadowed by the host resolver. Failed initial starts clean
+up libcontainer state before a retry, retaining the original error.
+
+See [the CoreDNS regression guide](../../docs/repros/coredns-start.md) and
+[`scripts/repro-coredns-start.sh`](../../scripts/repro-coredns-start.sh) for the
+native regression gate. The script preserves diagnostics and exits nonzero on
+startup, retry, or removal failures.

@@ -158,6 +158,28 @@ jobs:
         run: cargo build --locked -p oci-cri
       - name: CRI lifecycle + API coverage + streaming tests (fake engine)
         run: cargo test -p oci-cri --features test-support --locked --test cri_lifecycle --test cri_api_coverage --test streaming_exec
+      - name: Native CoreDNS and failed-start regressions
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y jq
+          ARTIFACTS="$RUNNER_TEMP/coredns-regression"
+          mkdir -p "$ARTIFACTS"
+          trap 'docker logs oci-cri-regression > "$ARTIFACTS/runtime.log" 2>&1; docker rm -f oci-cri-regression' EXIT
+          docker run -d --name oci-cri-regression --privileged --cgroupns private \
+            -v "$PWD/target/debug/oci-cri:/usr/local/bin/oci-cri:ro" \
+            -v "$ARTIFACTS:$ARTIFACTS" ubuntu:24.04 sh -ec \
+            'apt-get update -qq; apt-get install -y -qq libseccomp2 ca-certificates; exec oci-cri serve --socket "$1/cri.sock"' sh "$ARTIFACTS"
+          for _ in $(seq 1 120); do [ -S "$ARTIFACTS/cri.sock" ] && break; sleep 1; done
+          test -S "$ARTIFACTS/cri.sock"
+          sudo scripts/repro-coredns-start.sh "$ARTIFACTS/cri.sock" "$ARTIFACTS/results"
+      - name: Preserve native regression evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coredns-native-regression
+          path: |
+            ${{ runner.temp }}/coredns-regression/results
+            ${{ runner.temp }}/coredns-regression/runtime.log
       - name: CRI conformance (crictl smoke + critest)
         run: |
           set -euo pipefail

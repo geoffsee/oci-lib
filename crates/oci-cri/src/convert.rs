@@ -6,7 +6,7 @@
 //! so they are unit-tested without an engine. The service layer supplies the
 //! sandbox namespace paths (from the infra container's PID) and the rootfs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
@@ -144,18 +144,7 @@ pub fn container_spec(
             "options": ["bind", "rprivate"],
         }));
     }
-    let capabilities = security
-        .and_then(|s| s.capabilities.as_ref())
-        .map(|caps| {
-            json!({
-                "bounding": caps.add_capabilities,
-                "effective": caps.add_capabilities,
-                "permitted": caps.add_capabilities,
-                "ambient": [],
-                "inheritable": [],
-            })
-        })
-        .unwrap_or_else(|| json!({}));
+    let capabilities = capabilities_json(security.and_then(|s| s.capabilities.as_ref()))?;
     let namespace_json = namespace_list(namespaces, security);
     let resources = linux
         .and_then(|l| l.resources.as_ref())
@@ -324,8 +313,111 @@ fn default_mounts() -> Vec<Value> {
     ]
 }
 
+// Match containers-common's unprivileged default set. Explicit additions also
+// enter the inheritable set, as required by the CRI Capability contract.
+const DEFAULT_CAPABILITIES: &[&str] = &[
+    "CAP_CHOWN",
+    "CAP_DAC_OVERRIDE",
+    "CAP_FOWNER",
+    "CAP_FSETID",
+    "CAP_KILL",
+    "CAP_NET_BIND_SERVICE",
+    "CAP_SETFCAP",
+    "CAP_SETGID",
+    "CAP_SETPCAP",
+    "CAP_SETUID",
+    "CAP_SYS_CHROOT",
+];
+const ALL_CAPABILITIES: &[&str] = &[
+    "CAP_CHOWN",
+    "CAP_DAC_OVERRIDE",
+    "CAP_DAC_READ_SEARCH",
+    "CAP_FOWNER",
+    "CAP_FSETID",
+    "CAP_KILL",
+    "CAP_SETGID",
+    "CAP_SETUID",
+    "CAP_SETPCAP",
+    "CAP_LINUX_IMMUTABLE",
+    "CAP_NET_BIND_SERVICE",
+    "CAP_NET_BROADCAST",
+    "CAP_NET_ADMIN",
+    "CAP_NET_RAW",
+    "CAP_IPC_LOCK",
+    "CAP_IPC_OWNER",
+    "CAP_SYS_MODULE",
+    "CAP_SYS_RAWIO",
+    "CAP_SYS_CHROOT",
+    "CAP_SYS_PTRACE",
+    "CAP_SYS_PACCT",
+    "CAP_SYS_ADMIN",
+    "CAP_SYS_BOOT",
+    "CAP_SYS_NICE",
+    "CAP_SYS_RESOURCE",
+    "CAP_SYS_TIME",
+    "CAP_SYS_TTY_CONFIG",
+    "CAP_MKNOD",
+    "CAP_LEASE",
+    "CAP_AUDIT_WRITE",
+    "CAP_AUDIT_CONTROL",
+    "CAP_SETFCAP",
+    "CAP_MAC_OVERRIDE",
+    "CAP_MAC_ADMIN",
+    "CAP_SYSLOG",
+    "CAP_WAKE_ALARM",
+    "CAP_BLOCK_SUSPEND",
+    "CAP_AUDIT_READ",
+    "CAP_PERFMON",
+    "CAP_BPF",
+    "CAP_CHECKPOINT_RESTORE",
+];
+
+fn capability_set(names: &[String]) -> Result<BTreeSet<String>> {
+    let mut set = BTreeSet::new();
+    for name in names {
+        let name = name.to_ascii_uppercase();
+        let name = name.strip_prefix("CAP_").unwrap_or(&name);
+        if name == "ALL" {
+            set.extend(ALL_CAPABILITIES.iter().map(|cap| (*cap).to_string()));
+        } else {
+            let cap = format!("CAP_{name}");
+            if !ALL_CAPABILITIES.contains(&cap.as_str()) {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    format!("unknown capability {name}"),
+                    "",
+                ));
+            }
+            set.insert(cap);
+        }
+    }
+    Ok(set)
+}
+
+fn capabilities_json(caps: Option<&crate::api::Capability>) -> Result<Value> {
+    let mut base: BTreeSet<String> = DEFAULT_CAPABILITIES
+        .iter()
+        .map(|cap| (*cap).to_string())
+        .collect();
+    let mut added = BTreeSet::new();
+    let mut ambient = BTreeSet::new();
+    if let Some(caps) = caps {
+        for cap in capability_set(&caps.drop_capabilities)? {
+            base.remove(&cap);
+        }
+        added = capability_set(&caps.add_capabilities)?;
+        ambient = capability_set(&caps.add_ambient_capabilities)?;
+        added.extend(ambient.iter().cloned());
+        base.extend(added.iter().cloned());
+    }
+    Ok(
+        json!({"bounding": base, "effective": base, "permitted": base,
+        "inheritable": added, "ambient": ambient}),
+    )
+}
+
 fn image_args(image: Option<&ImageSpec>, command: &[String], args: &[String]) -> Vec<String> {
-    if !command.is_empty() || !args.is_empty() {
+    if !command.is_empty() {
         let mut out = command.to_vec();
         out.extend(args.iter().cloned());
         return out;
@@ -333,10 +425,14 @@ fn image_args(image: Option<&ImageSpec>, command: &[String], args: &[String]) ->
     match image {
         Some(image) => {
             let mut out = image.entrypoint.clone();
-            out.extend(image.cmd.iter().cloned());
+            out.extend(
+                if args.is_empty() { &image.cmd } else { args }
+                    .iter()
+                    .cloned(),
+            );
             out
         }
-        None => Vec::new(),
+        None => args.to_vec(),
     }
 }
 
@@ -454,6 +550,129 @@ mod tests {
                 .iter()
                 .any(|e| e == "A=1")
         );
+    }
+
+    #[test]
+    fn args_only_preserves_coredns_image_entrypoint() {
+        let image = ImageSpec {
+            entrypoint: vec!["/coredns".into()],
+            cmd: vec!["-conf".into(), "/etc/coredns/Corefile".into()],
+            ..ImageSpec::default()
+        };
+        let config = ContainerConfig {
+            args: vec!["-version".into()],
+            ..config()
+        };
+        let spec: Value = serde_json::from_str(
+            &container_spec(
+                &config,
+                "/rootfs",
+                Some(&image),
+                &NamespacePaths::default(),
+                "pod",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(spec["process"]["args"], json!(["/coredns", "-version"]));
+    }
+
+    #[test]
+    fn command_argument_override_matrix() {
+        for (command, args, expected) in [
+            (vec![], vec![], vec!["/entry", "serve"]),
+            (vec![], vec!["--help"], vec!["/entry", "--help"]),
+            (vec!["/other"], vec![], vec!["/other"]),
+            (vec!["/other"], vec!["arg"], vec!["/other", "arg"]),
+        ] {
+            let strings =
+                |items: Vec<&str>| items.into_iter().map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(
+                image_args(Some(&image()), &strings(command), &strings(args)),
+                strings(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn capabilities_default_drop_all_add_and_ambient() {
+        use crate::api::Capability;
+        let spec_for = |caps| {
+            let mut config = config();
+            config.linux = Some(LinuxContainerConfig {
+                security_context: Some(LinuxContainerSecurityContext {
+                    capabilities: caps,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+            serde_json::from_str::<Value>(
+                &container_spec(
+                    &config,
+                    "/rootfs",
+                    Some(&image()),
+                    &NamespacePaths::default(),
+                    "pod",
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        for caps in [None, Some(Capability::default())] {
+            let spec = spec_for(caps);
+            for set in ["bounding", "effective", "permitted"] {
+                assert!(
+                    spec["process"]["capabilities"][set]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!("CAP_NET_BIND_SERVICE"))
+                );
+                assert!(
+                    !spec["process"]["capabilities"][set]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!("CAP_SYS_ADMIN"))
+                );
+            }
+            assert_eq!(spec["process"]["capabilities"]["ambient"], json!([]));
+            assert_eq!(spec["process"]["capabilities"]["inheritable"], json!([]));
+        }
+        let spec = spec_for(Some(Capability {
+            drop_capabilities: vec!["ALL".into()],
+            add_capabilities: vec!["NET_BIND_SERVICE".into(), "CAP_NET_BIND_SERVICE".into()],
+            ..Default::default()
+        }));
+        for set in ["bounding", "effective", "permitted", "inheritable"] {
+            assert_eq!(
+                spec["process"]["capabilities"][set],
+                json!(["CAP_NET_BIND_SERVICE"])
+            );
+        }
+        assert_eq!(spec["process"]["capabilities"]["ambient"], json!([]));
+        let spec = spec_for(Some(Capability {
+            drop_capabilities: vec!["NET_BIND_SERVICE".into()],
+            add_ambient_capabilities: vec!["SYS_CHROOT".into()],
+            ..Default::default()
+        }));
+        assert!(
+            !spec["process"]["capabilities"]["bounding"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("CAP_NET_BIND_SERVICE"))
+        );
+        assert_eq!(
+            spec["process"]["capabilities"]["ambient"],
+            json!(["CAP_SYS_CHROOT"])
+        );
+        assert_eq!(
+            spec["process"]["capabilities"]["inheritable"],
+            json!(["CAP_SYS_CHROOT"])
+        );
+        let spec = spec_for(Some(Capability {
+            drop_capabilities: vec!["ALL".into()],
+            ..Default::default()
+        }));
+        assert_eq!(spec["process"]["capabilities"]["bounding"], json!([]));
     }
 
     #[test]

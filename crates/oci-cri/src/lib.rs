@@ -23,6 +23,7 @@
 pub mod api;
 pub mod config;
 pub mod convert;
+mod dns;
 pub mod engine;
 pub mod error;
 mod image_service;
