@@ -8,7 +8,7 @@
 use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 
@@ -108,7 +108,7 @@ fn accept_loop(listener: OwnedFd, socket: &PathBuf) -> Result<i32, Error> {
     }
 }
 
-fn wait_for_socket(socket: &PathBuf) -> Result<(), Error> {
+fn wait_for_socket(socket: &Path) -> Result<(), Error> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
         if socket.exists() {
