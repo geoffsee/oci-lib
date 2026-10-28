@@ -1249,6 +1249,18 @@ pub(crate) fn stop_pod_sandbox_sync(inner: &Inner, id: &str) -> CrateResult<()> 
             let _ = stop_container_sync(inner, &container.id, 2);
         }
     }
+    if !record.host_network && network::configured(&inner.config) {
+        // DEL must run in the sandbox namespace while its infra process still
+        // holds it open. Never substitute the runtime's own namespace.
+        let netns = inner
+            .engine
+            .container_state(&record.infra_container_id)
+            .ok()
+            .filter(|state| state.pid > 0 && state.status != "stopped")
+            .map(|state| PathBuf::from(format!("/proc/{}/ns/net", state.pid)))
+            .unwrap_or_default();
+        network::teardown(&inner.config, id, &netns);
+    }
     let _ = inner
         .engine
         .signal_container(&record.infra_container_id, 15);
@@ -1257,9 +1269,6 @@ pub(crate) fn stop_pod_sandbox_sync(inner: &Inner, id: &str) -> CrateResult<()> 
         if state.status == "running" {
             let _ = inner.engine.signal_container(&record.infra_container_id, 9);
         }
-    }
-    if network::configured(&inner.config) {
-        network::teardown(&inner.config, id, &PathBuf::from("/proc/self/ns/net"));
     }
     record.state = SandboxState::NotReady;
     inner.store.put_sandbox(record)?;
@@ -1902,5 +1911,100 @@ mod tests {
                 .any(|d| d.name == "container_cpu_usage_seconds_total")
         );
         assert!(descriptors.iter().any(|d| d.name.contains("memory")));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod network_teardown_regressions {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn teardown_targets_live_sandbox_and_skips_host_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        let conf = dir.path().join("conf");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&conf).unwrap();
+        let plugin = bin.join("probe");
+        std::fs::write(
+            &plugin,
+            r#"#!/bin/sh
+cat >/dev/null
+printf '%s %s\n' "$CNI_COMMAND" "$CNI_NETNS" >> "$(dirname "$0")/calls"
+if [ "$CNI_COMMAND" = DEL ]; then
+    pid=${CNI_NETNS#/proc/}
+    pid=${pid%%/*}
+    kill -0 "$pid" && echo alive >> "$(dirname "$0")/calls"
+fi
+echo '{"cniVersion":"1.0.0","ips":[{"address":"10.0.0.7/24"}]}'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(
+            conf.join("probe.conflist"),
+            r#"{"cniVersion":"1.0.0","name":"probe","plugins":[{"type":"probe"}]}"#,
+        )
+        .unwrap();
+        let root = dir.path().join("root");
+        let engine = Arc::new(crate::test_support::FakeEngine::new(root.clone()));
+        let service = CriService::open(
+            Config {
+                root,
+                state_root: dir.path().join("state"),
+                cni_bin_dir: Some(bin.clone()),
+                cni_conf_dir: Some(conf),
+                ..Config::default()
+            },
+            engine.clone(),
+        )
+        .unwrap();
+        for host_network in [false, true] {
+            let config = PodSandboxConfig {
+                linux: Some(LinuxPodSandboxConfig {
+                    security_context: Some(LinuxSandboxSecurityContext {
+                        namespace_options: Some(NamespaceOption {
+                            network: if host_network {
+                                NamespaceMode::Node as i32
+                            } else {
+                                NamespaceMode::Pod as i32
+                            },
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let sandbox = run_pod_sandbox_sync(
+                &service.inner,
+                RunPodSandboxRequest {
+                    config: Some(config),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let record = service.inner.sandbox_record(&sandbox).unwrap();
+            let pid = engine
+                .container_state(&record.infra_container_id)
+                .unwrap()
+                .pid;
+            stop_pod_sandbox_sync(&service.inner, &sandbox).unwrap();
+            let calls = std::fs::read_to_string(bin.join("calls")).unwrap();
+            if !host_network {
+                assert!(
+                    calls.contains(&format!("DEL /proc/{pid}/ns/net\nalive\n")),
+                    "{calls}"
+                );
+            } else {
+                assert!(
+                    !calls.contains(&format!("/proc/{pid}/ns/net")),
+                    "host network was passed to CNI: {calls}"
+                );
+            }
+            assert!(!calls.contains("/proc/self/ns/net"));
+        }
     }
 }
