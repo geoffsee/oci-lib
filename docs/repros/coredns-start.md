@@ -28,6 +28,14 @@ cgroup hierarchy. Run it as PID 1 if containerized; run the client in a separate
 container sharing the runtime socket and artifact directory. See the crate's
 README for runtime setup. The script requires `crictl` and `jq`.
 
+Install the runtime binary as a regular file inside a test container (for
+example, `docker cp` into a created container). A single-file bind mount over
+the executable is incompatible with runc 1.5.2's sealed overlay clone of its
+parent directory: the clone sees the underlying empty mountpoint rather than
+the mounted binary. This reproduced as `exec format error` locally and
+`permission denied` in CI. Copying the same binary into the container fixes the
+fixture without changing the workload or its security settings.
+
 ```sh
 scripts/repro-coredns-start.sh /run/oci-cri/oci-cri.sock /shared/coredns-run-1
 ```

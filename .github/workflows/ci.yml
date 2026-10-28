@@ -165,10 +165,13 @@ jobs:
           ARTIFACTS="$RUNNER_TEMP/coredns-regression"
           mkdir -p "$ARTIFACTS"
           trap 'docker logs oci-cri-regression > "$ARTIFACTS/runtime.log" 2>&1; sudo dmesg > "$ARTIFACTS/kernel.log" 2>&1 || true; docker rm -f oci-cri-regression' EXIT
-          docker run -d --name oci-cri-regression --privileged --cgroupns private \
-            -v "$PWD/target/debug/oci-cri:/usr/local/bin/oci-cri:ro" \
+          # Install a real file: runc's sealed overlay clone of the parent
+          # directory cannot see an executable supplied by a single-file bind.
+          docker create --name oci-cri-regression --privileged --cgroupns private \
             -v "$ARTIFACTS:$ARTIFACTS" ubuntu:24.04 sh -ec \
             'apt-get update -qq; apt-get install -y -qq libseccomp2 ca-certificates; exec oci-cri serve --socket "$1/cri.sock"' sh "$ARTIFACTS"
+          docker cp target/debug/oci-cri oci-cri-regression:/usr/local/bin/oci-cri
+          docker start oci-cri-regression
           for _ in $(seq 1 120); do [ -S "$ARTIFACTS/cri.sock" ] && break; sleep 1; done
           test -S "$ARTIFACTS/cri.sock"
           sudo scripts/repro-coredns-start.sh "$ARTIFACTS/cri.sock" "$ARTIFACTS/results"
