@@ -17,7 +17,7 @@ A Rust monorepo for daemonless OCI image building and container execution.
 |---|---|---|---|---|---|
 | [`oci-builder`](crates/oci-builder) | `oci-builder` | [Buildah](https://github.com/containers/buildah) | Build & push OCI container images | In-process Go c-archive (`startup()`) | Apple Virtualization Linux guest (vsock) |
 | [`oci-runner`](crates/oci-runner) | `oci-runner` | [libcontainer](https://github.com/opencontainers/runc/tree/main/libcontainer) | Execute foreground containers from a rootfs | In-process Go c-archive (`startup()`) | Apple Virtualization Linux guest (vsock) |
-| [`oci-cri`](crates/oci-cri) | `oci-cri` | libcontainer + containers/image & storage | Vendor-agnostic CRI v1 runtime for any kubelet | In-process Go c-archive (`startup()`) | Stub; `--features vm` → Virtualization guest (vsock proxy) |
+| [`oci-cri`](crates/oci-cri) | `oci-cri` | libcontainer + containers/image & storage | Vendor-agnostic CRI v1 runtime for any kubelet | In-process Go c-archive (`startup()`) | Apple Virtualization Linux guest (vsock proxy; `--features vm`) |
 
 [`oci-util`](crates/oci-util) provides the shared utility library: Notary Project
 signature helpers and (behind the `vm` / `guest-embed` features) the macOS
@@ -60,9 +60,9 @@ cargo install oci-runner
 cargo install oci-cri
 ```
 
-A macOS build embeds the guest from `crates/<crate>/guest/out/` when present. Otherwise it downloads the release's kernel and initramfs into `~/Library/Caches/<crate>/downloads` (override with `ROB_GUEST_CACHE` / `ROR_GUEST_CACHE`), verifies their checksums, and embeds them.
+A macOS build embeds the guest from `crates/<crate>/guest/out/` when present. Otherwise it downloads the release's kernel and initramfs into `~/Library/Caches/<crate>/downloads` (override with `ROB_GUEST_CACHE` / `ROR_GUEST_CACHE` / `ROK_GUEST_CACHE`), verifies their checksums, and embeds them. `oci-cri` keeps the `vm` feature opt-in until those guest assets are published; build with `--features vm`.
 
-`cargo xtask guest` also embeds the Linux build system's public CA bundle at `/etc/ssl/certs/ca-certificates.crt` in both guests. Install `ca-certificates` in the Linux build environment before running it. The bundle is validated and recorded in the guest attestation; host builds reject guests that omit it. Registry HTTPS uses these trust roots with certificate verification enabled.
+`cargo xtask guest` also embeds the Linux build system's public CA bundle at `/etc/ssl/certs/ca-certificates.crt` in the guests. Install `ca-certificates` in the Linux build environment before running it. The bundle is validated and recorded in the guest attestation; host builds reject guests that omit it. Registry HTTPS uses these trust roots with certificate verification enabled.
 
 The guests use a 1280-byte network MTU to avoid connection resets on large TLS handshakes through Apple Virtualization NAT. TLS verification and the engine's default key exchange algorithms remain enabled.
 
@@ -174,14 +174,21 @@ oci-lib/
     │   ├── shim/               # Go Buildah c-archive shim
     │   ├── src/                # Library & CLI sources
     │   └── tests/
-    └── oci-runner/             # libcontainer runtime crate (lib & CLI)
+    ├── oci-runner/             # libcontainer runtime crate (lib & CLI)
+    │   ├── Cargo.toml
+    │   ├── build.rs
+    │   ├── guest/out/          # Built guest kernel and initramfs (not committed)
+    │   ├── native/             # Early constructor
+    │   ├── shim/               # Go libcontainer c-archive shim
+    │   ├── src/                # Library & CLI sources
+    │   └── tests/
+    └── oci-cri/                # CRI v1 runtime crate (lib & CLI)
         ├── Cargo.toml
         ├── build.rs
         ├── guest/out/          # Built guest kernel and initramfs (not committed)
         ├── native/             # Early constructor
-        ├── shim/               # Go libcontainer c-archive shim
-        ├── src/                # Library & CLI sources
-        └── tests/
+        ├── shim/               # Go libcontainer + image/storage shim
+        └── src/                # Library & CLI sources
 ```
 
 ---

@@ -74,6 +74,7 @@ jobs:
         run: |
           cargo build --release --locked -p oci-builder
           cargo build --release --locked -p oci-runner
+          cargo build --release --locked -p oci-cri
       - name: Allow unprivileged user namespaces
         run: |
           set -euo pipefail
@@ -86,9 +87,11 @@ jobs:
           mkdir -p dist
           cp target/release/oci-builder dist/oci-builder
           cp target/release/oci-runner dist/oci-runner
-          chmod 755 dist/oci-builder dist/oci-runner
+          cp target/release/oci-cri dist/oci-cri
+          chmod 755 dist/oci-builder dist/oci-runner dist/oci-cri
           ./dist/oci-builder --help >/dev/null
           ./dist/oci-runner --help >/dev/null
+          ./dist/oci-cri --help >/dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
@@ -96,7 +99,7 @@ jobs:
       - name: Build the Apple Silicon guests
         if: matrix.guest
         run: |
-          cargo xtask guest oci-builder oci-runner
+          cargo xtask guest oci-builder oci-runner oci-cri
       - name: Validate guest compatibility metadata
         if: matrix.guest
         run: |
@@ -105,7 +108,7 @@ jobs:
           import gzip, hashlib, json, pathlib, subprocess
 
           expected_version = pathlib.Path("Cargo.toml").read_text().split('version = "', 1)[1].split('"', 1)[0]
-          for package in ("oci-builder", "oci-runner"):
+          for package in ("oci-builder", "oci-runner", "oci-cri"):
               root = pathlib.Path("crates") / package / "guest" / "out"
               document = json.loads((root / "attestation.json").read_text())
               if document.get("package") != package:
@@ -146,6 +149,11 @@ jobs:
         with:
           name: guest-aarch64-runner
           path: crates/oci-runner/guest/out/
+      - uses: actions/upload-artifact@v4
+        if: matrix.guest
+        with:
+          name: guest-aarch64-cri
+          path: crates/oci-cri/guest/out/
 
   macos-binary:
     name: aarch64-apple-darwin
@@ -170,16 +178,21 @@ jobs:
         with:
           name: guest-aarch64-runner
           path: crates/oci-runner/guest/out
+      - uses: actions/download-artifact@v4
+        with:
+          name: guest-aarch64-cri
+          path: crates/oci-cri/guest/out
       - name: Embed the guests and build
         run: |
           cargo build --release --locked -p oci-builder
           cargo build --release --locked -p oci-runner
+          cargo build --release --locked -p oci-cri --features vm
       - name: Check signatures and that guests were embedded
         run: |
           set -euo pipefail
           mkdir -p dist
           version="${GITHUB_REF_NAME#v}"
-          for bin_name in oci-builder oci-runner; do
+          for bin_name in oci-builder oci-runner oci-cri; do
             bin="target/release/$bin_name"
             codesign --verify --verbose=2 "$bin"
             codesign -d --entitlements - "$bin" | grep -q com.apple.security.virtualization
@@ -188,7 +201,7 @@ jobs:
             "$bin" --help >/dev/null
             cp "$bin" "dist/$bin_name"
           done
-          for bin_name in oci-builder oci-runner; do
+          for bin_name in oci-builder oci-runner oci-cri; do
             report=$("target/release/$bin_name" diagnose 2>&1) || status=$?
             status=${status:-0}
             printf '%s\n' "$report"
@@ -233,7 +246,7 @@ jobs:
           esac
           mkdir -p packages
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin; do
-            for pkg in oci-builder oci-runner; do
+            for pkg in oci-builder oci-runner oci-cri; do
               stage=$(mktemp -d)
               cp "artifacts/${target}/${pkg}" "$stage/${pkg}"
               chmod 755 "$stage/${pkg}"
@@ -245,8 +258,10 @@ jobs:
           # guest/out/ is uploaded whole, so attestation.json is already in the artifact.
           cp artifacts/guest-aarch64-builder/initramfs "packages/oci-builder-${version}-aarch64-initramfs"
           cp artifacts/guest-aarch64-runner/initramfs "packages/oci-runner-${version}-aarch64-initramfs"
+          cp artifacts/guest-aarch64-cri/initramfs "packages/oci-cri-${version}-aarch64-initramfs"
           cp artifacts/guest-aarch64-builder/attestation.json "packages/oci-builder-${version}-aarch64-guest-attestation.json"
           cp artifacts/guest-aarch64-runner/attestation.json "packages/oci-runner-${version}-aarch64-guest-attestation.json"
+          cp artifacts/guest-aarch64-cri/attestation.json "packages/oci-cri-${version}-aarch64-guest-attestation.json"
           (cd packages && sha256sum ./*.tar.gz ./*-initramfs ./*-guest-attestation.json > SHA256SUMS)
       - name: Publish the GitHub release
         env:
@@ -262,7 +277,7 @@ jobs:
             printf '%s\n' \
               "## Binaries" \
               "" \
-              "Archives contain \`oci-builder\` and \`oci-runner\`. The Apple Silicon binaries embed the zstd-compressed Linux kernel and initramfs and write them to the cache directory on first use. The \`*-initramfs\` assets are what macOS builds from source download when \`guest/out\` is absent. The \`*-guest-attestation.json\` assets are the kernel, initramfs, and initramfs member hashes for that guest. Linux binaries are built on Ubuntu 24.04 and need that glibc plus \`libseccomp.so.2\`." \
+              "Archives contain \`oci-builder\`, \`oci-runner\`, and \`oci-cri\`. The Apple Silicon binaries embed the zstd-compressed Linux kernel and initramfs and write them to the cache directory on first use. The \`*-initramfs\` assets are what macOS builds from source download when \`guest/out\` is absent. The \`*-guest-attestation.json\` assets are the kernel, initramfs, and initramfs member hashes for that guest. Linux binaries are built on Ubuntu 24.04 and need that glibc plus \`libseccomp.so.2\`. macOS \`oci-cri\` requires \`--features vm\` until guest downloads ship in a release and \`vm\` becomes a default feature." \
               ""
             gh api --method POST \
               -H "Accept: application/vnd.github+json" \
