@@ -759,8 +759,14 @@ impl RuntimeService for CriService {
             if !stats_container_matches(&record, filter.as_ref()) {
                 continue;
             }
-            if let Ok(one) = self.inner.engine.container_stats(&record.id) {
-                stats.push(build_container_stats(&record, &one));
+            match self.inner.engine.container_stats(&record.id) {
+                Ok(one) => stats.push(build_container_stats(&record, &one)),
+                Err(error) => {
+                    eprintln!(
+                        "oci-cri: failed to collect container {} stats: {error}",
+                        record.id
+                    )
+                }
             }
         }
         Ok(Response::new(ListContainerStatsResponse { stats }))
@@ -813,8 +819,14 @@ impl RuntimeService for CriService {
                     continue;
                 }
             }
-            if let Ok(one) = pod_sandbox_stats_sync(&self.inner, &sandbox.id) {
-                stats.push(one);
+            match pod_sandbox_stats_sync(&self.inner, &sandbox.id) {
+                Ok(one) => stats.push(one),
+                Err(error) => {
+                    eprintln!(
+                        "oci-cri: failed to collect sandbox {} stats: {error}",
+                        sandbox.id
+                    )
+                }
             }
         }
         Ok(Response::new(ListPodSandboxStatsResponse { stats }))

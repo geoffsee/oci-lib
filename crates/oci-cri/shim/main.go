@@ -32,11 +32,13 @@ import (
 	"encoding/json"
 	"os"
 	"strconv"
+	"sync"
 	"unsafe"
 
 	_ "github.com/opencontainers/cgroups/devices"
 	"github.com/opencontainers/runc/libcontainer"
 	_ "github.com/opencontainers/runc/libcontainer/nsenter"
+	"go.podman.io/storage/pkg/reexec"
 )
 
 const (
@@ -70,8 +72,17 @@ func init() {
 
 //export rok_startup
 func rok_startup(_ *C.rok_error) C.int32_t {
+	startupOnce.Do(func() {
+		// Storage layer extraction re-execs this executable with a registered
+		// helper name in argv[0]. Dispatch before Rust parses CLI arguments.
+		if reexec.Init() {
+			os.Exit(0)
+		}
+	})
 	return C.ROK_OK
 }
+
+var startupOnce sync.Once
 
 //export rok_call
 func rok_call(request *C.char, stdioFn C.rok_stdio_fn, stdioUser unsafe.Pointer, inputFn C.rok_input_fn, inputUser unsafe.Pointer, out *C.rok_buffer, errOut *C.rok_error) C.int32_t {

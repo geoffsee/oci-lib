@@ -17,7 +17,6 @@ import (
 	"go.podman.io/common/pkg/config"
 	"go.podman.io/image/v5/types"
 	"go.podman.io/storage"
-	"go.podman.io/storage/pkg/reexec"
 )
 
 // Image operations on containers/image+storage, through libimage (the same
@@ -63,7 +62,6 @@ func imageRuntime(root string, insecure bool, auth *authConfig) (*libimage.Runti
 			return nil, nil, fail(codePrereq, "opening image store", err.Error())
 		}
 	}
-	_ = reexec.Init
 	sys := &types.SystemContext{
 		DockerInsecureSkipTLSVerify: types.OptionalBoolFalse,
 	}

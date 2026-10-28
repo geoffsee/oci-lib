@@ -34,12 +34,21 @@ trap 'rm -rf "$TMPD"' EXIT
 printf '%s' "$POD_JSON" > "$TMPD/pod.json"
 printf '%s' "$CTR_JSON" > "$TMPD/ctr.json"
 POD_ID="$(crictl --runtime-endpoint "$ENDPOINT" runp "$TMPD/pod.json")"
-CTR_ID="$(crictl --runtime-endpoint "$ENDPOINT" create "$POD_ID" "$TMPD/ctr.json" "$TMPD/pod.json")"
-crictl --runtime-endpoint "$ENDPOINT" start "$CTR_ID"
-crictl --runtime-endpoint "$ENDPOINT" ps -a
-crictl --runtime-endpoint "$ENDPOINT" stats -o json >/dev/null || true
-crictl --runtime-endpoint "$ENDPOINT" stop "$CTR_ID"
-crictl --runtime-endpoint "$ENDPOINT" rm "$CTR_ID"
+# Both paths must finish the monitor and retain the actual exit status.
+for STOP_TIMEOUT in 5 0; do
+    CTR_ID="$(crictl --runtime-endpoint "$ENDPOINT" create "$POD_ID" "$TMPD/ctr.json" "$TMPD/pod.json")"
+    crictl --runtime-endpoint "$ENDPOINT" start "$CTR_ID"
+    crictl --runtime-endpoint "$ENDPOINT" stats -o json "$CTR_ID" > "$TMPD/stats.json"
+    # A successful RPC with an empty list must not pass the metrics gate.
+    grep -F "\"$CTR_ID\"" "$TMPD/stats.json" >/dev/null
+    crictl --runtime-endpoint "$ENDPOINT" stop --timeout "$STOP_TIMEOUT" "$CTR_ID"
+    crictl --runtime-endpoint "$ENDPOINT" inspect "$CTR_ID" > "$TMPD/status.json"
+    grep -F '"CONTAINER_EXITED"' "$TMPD/status.json" >/dev/null
+    EXPECTED_EXIT=0
+    [ "$STOP_TIMEOUT" -ne 0 ] || EXPECTED_EXIT=137
+    grep -E "\"exitCode\"[[:space:]]*:[[:space:]]*$EXPECTED_EXIT," "$TMPD/status.json" >/dev/null
+    crictl --runtime-endpoint "$ENDPOINT" rm "$CTR_ID"
+done
 crictl --runtime-endpoint "$ENDPOINT" stopp "$POD_ID"
 crictl --runtime-endpoint "$ENDPOINT" rmp "$POD_ID"
 echo "crictl lifecycle smoke OK"

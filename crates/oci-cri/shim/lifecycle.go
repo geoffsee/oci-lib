@@ -115,6 +115,11 @@ func opCreate(req *opRequest) error {
 	if rootless {
 		specconv.ToRootless(&spec)
 	}
+	if !rootless {
+		if err := prepareCgroupRoot(); err != nil {
+			return fail(codeRun, "prepare delegated cgroup", err.Error())
+		}
+	}
 	opts := &specconv.CreateOpts{
 		CgroupName:      req.ID,
 		Spec:            &spec,
@@ -179,6 +184,14 @@ func opStart(req *opRequest, hooks *ioHooks) error {
 	if err != nil {
 		return fail(codeInternal, "stdin pipe", err.Error())
 	}
+	defer stdinRead.Close()
+	started := false
+	defer func() {
+		if !started {
+			_ = stdinWrite.Close()
+			h.stdin = nil
+		}
+	}()
 	process.Stdin = stdinRead
 	h.stdin = stdinWrite
 	if hooks != nil && hooks.emit != nil {
@@ -186,10 +199,16 @@ func opStart(req *opRequest, hooks *ioHooks) error {
 		if err := pipeTo(&h.pumps, &process.Stdout, emit, 1); err != nil {
 			return err
 		}
+		// Start duplicates these descriptors into the child. Keeping the
+		// parent writers open prevents EOF and deadlocks opWait on pumps.
+		defer process.Stdout.(*os.File).Close()
 		if spec.Process.Terminal {
 			process.Stderr = process.Stdout
-		} else if err := pipeTo(&h.pumps, &process.Stderr, emit, 2); err != nil {
-			return err
+		} else {
+			if err := pipeTo(&h.pumps, &process.Stderr, emit, 2); err != nil {
+				return err
+			}
+			defer process.Stderr.(*os.File).Close()
 		}
 	} else {
 		process.Stdout = os.Stdout
@@ -204,6 +223,7 @@ func opStart(req *opRequest, hooks *ioHooks) error {
 	}
 	_ = stdinRead.Close()
 	h.process = process
+	started = true
 	return nil
 }
 
@@ -218,7 +238,8 @@ func opWait(req *opRequest) (any, error) {
 	code := -1
 	if h.process != nil {
 		state, err := h.process.Wait()
-		if err != nil {
+		// A nonzero exit (including SIGKILL) returns both state and ExitError.
+		if err != nil && state == nil {
 			return nil, fail(codeRun, "wait", err.Error())
 		}
 		code = exitCode(state)
@@ -320,6 +341,17 @@ func opStats(req *opRequest) (any, error) {
 	if err != nil {
 		return nil, fail(codeRun, "container stats", err.Error())
 	}
+	out := engineStats(stats)
+	if spec, err := savedSpec(req.StoreRoot, req.ID); err == nil && spec.Root != nil {
+		size, inodes := dirUsage(spec.Root.Path)
+		out["writable_size"] = size
+		out["inodes_used"] = inodes
+	}
+	return out, nil
+}
+
+// engineStats is the complete JSON contract consumed by Rust EngineStats.
+func engineStats(stats *libcontainer.Stats) map[string]any {
 	out := map[string]any{
 		"cpu_total_ns":  uint64(0),
 		"cpu_system_ns": uint64(0),
@@ -332,6 +364,7 @@ func opStats(req *opRequest) (any, error) {
 	}
 	if stats.CgroupStats != nil {
 		out["cpu_total_ns"] = stats.CgroupStats.CpuStats.CpuUsage.TotalUsage
+		out["cpu_system_ns"] = stats.CgroupStats.CpuStats.CpuUsage.UsageInKernelmode
 		out["cpu_percpu_ns"] = stats.CgroupStats.CpuStats.CpuUsage.PercpuUsage
 		out["mem_usage"] = stats.CgroupStats.MemoryStats.Usage.Usage
 		if stats.CgroupStats.MemoryStats.Usage.Limit != 0 {
@@ -340,19 +373,18 @@ func opStats(req *opRequest) (any, error) {
 		out["mem_cache"] = stats.CgroupStats.MemoryStats.Cache
 		out["mem_swap"] = stats.CgroupStats.MemoryStats.SwapUsage.Usage
 	}
-	var rx, tx uint64
+	var rx, tx, rxErrors, txErrors uint64
 	for _, iface := range stats.Interfaces {
 		rx += iface.RxBytes
 		tx += iface.TxBytes
+		rxErrors += iface.RxErrors
+		txErrors += iface.TxErrors
 	}
 	out["rx_bytes"] = rx
 	out["tx_bytes"] = tx
-	if spec, err := savedSpec(req.StoreRoot, req.ID); err == nil && spec.Root != nil {
-		size, inodes := dirUsage(spec.Root.Path)
-		out["writable_size"] = size
-		out["inodes_used"] = inodes
-	}
-	return out, nil
+	out["rx_errors"] = rxErrors
+	out["tx_errors"] = txErrors
+	return out
 }
 
 func dirUsage(root string) (uint64, uint64) {
@@ -479,7 +511,7 @@ func opExec(req *opRequest, hooks *ioHooks) (any, error) {
 		return nil, fail(codeRun, "exec", err.Error())
 	}
 	state, err := process.Wait()
-	if err != nil {
+	if err != nil && state == nil {
 		return nil, fail(codeRun, "exec wait", err.Error())
 	}
 	return map[string]any{"exit_code": exitCode(state)}, nil
