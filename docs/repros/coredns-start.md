@@ -74,3 +74,26 @@ cover generated contents, workload mounts, removal, invalid tokens, and I/O erro
 Diorama's native smoke now checks normal pod DNS resolution without explicitly
 supplying a DNS server, alongside networking, exec, logs, stats, resources, and
 cleanup. Seccomp enforcement remains unsupported; this is not a conformance claim.
+
+## Threaded init state regression
+
+Storage validation exposed a separate process-state race. During Linux exec's
+`de_thread`, the Go init's original thread can appear as `runc:[2:INIT] Z` while
+another thread is replacing it. Reading procfs at that moment marked a live
+workload Exited with code -1, or made sandbox setup fail with "container still
+running". The captured writer continued running and its volume write succeeded.
+
+Owned child processes now have one wait goroutine. State, exit status, signals,
+and removal share that wait result; sandbox children are reaped too. Reloaded
+containers still use libcontainer's persisted state because they are not owned
+children of the new daemon.
+
+```sh
+scripts/repro-threaded-init.sh /run/oci-cri/oci-cri.sock /shared/threaded-run-1
+```
+
+This requires `cc` with static pthread support in addition to `crictl` and `jq`.
+The fixture deliberately exits its initial thread while another thread remains
+alive. CRI must report Running until that worker is released, then report exit
+42 and retain its output. The same fixture failed before the fix and passed
+afterward on Linux arm64. CI runs it alongside the startup regression.

@@ -164,7 +164,7 @@ jobs:
           sudo apt-get install -y jq
           ARTIFACTS="$RUNNER_TEMP/coredns-regression"
           mkdir -p "$ARTIFACTS"
-          trap 'docker logs oci-cri-regression > "$ARTIFACTS/runtime.log" 2>&1; docker rm -f oci-cri-regression' EXIT
+          trap 'docker logs oci-cri-regression > "$ARTIFACTS/runtime.log" 2>&1; sudo dmesg > "$ARTIFACTS/kernel.log" 2>&1 || true; docker rm -f oci-cri-regression' EXIT
           docker run -d --name oci-cri-regression --privileged --cgroupns private \
             -v "$PWD/target/debug/oci-cri:/usr/local/bin/oci-cri:ro" \
             -v "$ARTIFACTS:$ARTIFACTS" ubuntu:24.04 sh -ec \
@@ -172,6 +172,7 @@ jobs:
           for _ in $(seq 1 120); do [ -S "$ARTIFACTS/cri.sock" ] && break; sleep 1; done
           test -S "$ARTIFACTS/cri.sock"
           sudo scripts/repro-coredns-start.sh "$ARTIFACTS/cri.sock" "$ARTIFACTS/results"
+          sudo scripts/repro-threaded-init.sh "$ARTIFACTS/cri.sock" "$ARTIFACTS/threaded-init"
       - name: Preserve native regression evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -179,7 +180,9 @@ jobs:
           name: coredns-native-regression
           path: |
             ${{ runner.temp }}/coredns-regression/results
+            ${{ runner.temp }}/coredns-regression/threaded-init
             ${{ runner.temp }}/coredns-regression/runtime.log
+            ${{ runner.temp }}/coredns-regression/kernel.log
       - name: CRI conformance (crictl smoke + critest)
         run: |
           set -euo pipefail
