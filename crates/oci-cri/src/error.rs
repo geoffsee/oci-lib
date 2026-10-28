@@ -124,3 +124,68 @@ impl From<Error> for tonic::Status {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_message_uses_fallback() {
+        let err = Error::new(ErrorCode::NotFound, "", "path");
+        assert_eq!(err.message(), "not found");
+        assert_eq!(err.detail(), "path");
+        assert_eq!(err.to_string(), "not found\npath");
+    }
+
+    #[test]
+    fn display_omits_blank_detail() {
+        let err = Error::new(ErrorCode::Run, "boom", "");
+        assert_eq!(err.to_string(), "boom");
+    }
+
+    #[test]
+    fn from_raw_maps_known_codes_and_defaults_to_internal() {
+        assert_eq!(ErrorCode::from_raw(1), ErrorCode::InvalidArgument);
+        assert_eq!(ErrorCode::from_raw(3), ErrorCode::NotFound);
+        assert_eq!(ErrorCode::from_raw(4), ErrorCode::Prerequisite);
+        assert_eq!(ErrorCode::from_raw(5), ErrorCode::Run);
+        assert_eq!(ErrorCode::from_raw(8), ErrorCode::Unsupported);
+        assert_eq!(ErrorCode::from_raw(10), ErrorCode::State);
+        assert_eq!(ErrorCode::from_raw(99), ErrorCode::Internal);
+        assert_eq!(ErrorCode::from_raw(9), ErrorCode::Internal);
+    }
+
+    #[test]
+    fn maps_to_grpc_status_codes() {
+        assert_eq!(
+            tonic::Status::from(Error::new(ErrorCode::InvalidArgument, "bad", "")).code(),
+            tonic::Code::InvalidArgument
+        );
+        assert_eq!(
+            tonic::Status::from(Error::new(ErrorCode::NotFound, "gone", "")).code(),
+            tonic::Code::NotFound
+        );
+        assert_eq!(
+            tonic::Status::from(Error::new(ErrorCode::State, "wrong", "")).code(),
+            tonic::Code::FailedPrecondition
+        );
+        assert_eq!(
+            tonic::Status::from(Error::new(ErrorCode::Unsupported, "nope", "")).code(),
+            tonic::Code::Unimplemented
+        );
+        assert_eq!(
+            tonic::Status::from(Error::new(ErrorCode::Internal, "oops", "")).code(),
+            tonic::Code::Internal
+        );
+        assert_eq!(
+            tonic::Status::from(Error::new(ErrorCode::Run, "fail", "")).code(),
+            tonic::Code::Internal
+        );
+    }
+
+    #[test]
+    fn as_exit_matches_repr() {
+        assert_eq!(ErrorCode::InvalidArgument.as_exit(), 1);
+        assert_eq!(ErrorCode::Unsupported.as_exit(), 8);
+    }
+}

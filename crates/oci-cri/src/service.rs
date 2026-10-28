@@ -1696,4 +1696,199 @@ mod tests {
         assert_eq!(version.runtime_name, "oci-cri");
         assert_eq!(version.runtime_api_version, "v1");
     }
+
+    fn sandbox(id: &str, ready: bool, label: Option<(&str, &str)>) -> SandboxRecord {
+        let mut labels = BTreeMap::new();
+        if let Some((k, v)) = label {
+            labels.insert(k.into(), v.into());
+        }
+        SandboxRecord {
+            id: id.into(),
+            metadata: StoredMetadata {
+                name: "pod".into(),
+                uid: "uid".into(),
+                namespace: "ns".into(),
+                attempt: 1,
+            },
+            labels,
+            annotations: BTreeMap::new(),
+            created_at_ns: 1,
+            state: if ready {
+                SandboxState::Ready
+            } else {
+                SandboxState::NotReady
+            },
+            infra_container_id: "infra".into(),
+            ip: String::new(),
+            extra_ips: Vec::new(),
+            host_network: false,
+            linux_json: String::new(),
+            log_directory: String::new(),
+        }
+    }
+
+    fn container(
+        id: &str,
+        sandbox_id: &str,
+        state: StoredState,
+        label: Option<(&str, &str)>,
+    ) -> ContainerRecord {
+        let mut labels = BTreeMap::new();
+        if let Some((k, v)) = label {
+            labels.insert(k.into(), v.into());
+        }
+        ContainerRecord {
+            id: id.into(),
+            sandbox_id: sandbox_id.into(),
+            metadata: StoredMetadata {
+                name: "app".into(),
+                uid: String::new(),
+                namespace: String::new(),
+                attempt: 1,
+            },
+            image: "img".into(),
+            image_ref: String::new(),
+            labels,
+            annotations: BTreeMap::new(),
+            log_path: String::new(),
+            tty: false,
+            stdin: false,
+            stdin_once: false,
+            state,
+            created_at_ns: 1,
+            started_at_ns: 0,
+            finished_at_ns: 0,
+            exit_code: -1,
+            reason: String::new(),
+            message: String::new(),
+            spec_json: String::new(),
+            rootfs: String::new(),
+            stop_signal: String::new(),
+        }
+    }
+
+    #[test]
+    fn sandbox_filters_by_id_state_and_labels() {
+        let ready = sandbox("sb-ready", true, Some(("tier", "front")));
+        let stopped = sandbox("sb-stop", false, Some(("tier", "back")));
+        assert!(sandbox_matches(&ready, None));
+        assert!(sandbox_matches(
+            &ready,
+            Some(&PodSandboxFilter {
+                id: "sb-ready".into(),
+                ..PodSandboxFilter::default()
+            })
+        ));
+        assert!(!sandbox_matches(
+            &ready,
+            Some(&PodSandboxFilter {
+                id: "other".into(),
+                ..PodSandboxFilter::default()
+            })
+        ));
+        assert!(sandbox_matches(
+            &ready,
+            Some(&PodSandboxFilter {
+                state: Some(PodSandboxStateValue {
+                    state: PodSandboxState::SandboxReady as i32,
+                }),
+                ..PodSandboxFilter::default()
+            })
+        ));
+        assert!(!sandbox_matches(
+            &stopped,
+            Some(&PodSandboxFilter {
+                state: Some(PodSandboxStateValue {
+                    state: PodSandboxState::SandboxReady as i32,
+                }),
+                ..PodSandboxFilter::default()
+            })
+        ));
+        assert!(sandbox_matches(
+            &ready,
+            Some(&PodSandboxFilter {
+                label_selector: HashMap::from([("tier".into(), "front".into())]),
+                ..PodSandboxFilter::default()
+            })
+        ));
+        assert!(!sandbox_matches(
+            &ready,
+            Some(&PodSandboxFilter {
+                label_selector: HashMap::from([("tier".into(), "back".into())]),
+                ..PodSandboxFilter::default()
+            })
+        ));
+    }
+
+    #[test]
+    fn container_filters_by_sandbox_state_and_labels() {
+        let running = container("c1", "sb1", StoredState::Running, Some(("app", "web")));
+        let created = container("c2", "sb2", StoredState::Created, None);
+        assert!(container_matches(
+            &running,
+            Some(&ContainerFilter {
+                pod_sandbox_id: "sb1".into(),
+                ..ContainerFilter::default()
+            })
+        ));
+        assert!(!container_matches(
+            &running,
+            Some(&ContainerFilter {
+                pod_sandbox_id: "sb2".into(),
+                ..ContainerFilter::default()
+            })
+        ));
+        assert!(container_matches(
+            &running,
+            Some(&ContainerFilter {
+                state: Some(ContainerStateValue {
+                    state: ContainerState::ContainerRunning as i32,
+                }),
+                ..ContainerFilter::default()
+            })
+        ));
+        assert!(!container_matches(
+            &created,
+            Some(&ContainerFilter {
+                state: Some(ContainerStateValue {
+                    state: ContainerState::ContainerRunning as i32,
+                }),
+                ..ContainerFilter::default()
+            })
+        ));
+        assert!(container_matches(
+            &running,
+            Some(&ContainerFilter {
+                label_selector: HashMap::from([("app".into(), "web".into())]),
+                ..ContainerFilter::default()
+            })
+        ));
+        assert!(stats_container_matches(
+            &running,
+            Some(&ContainerStatsFilter {
+                id: "c1".into(),
+                pod_sandbox_id: "sb1".into(),
+                label_selector: HashMap::from([("app".into(), "web".into())]),
+            })
+        ));
+        assert!(!stats_container_matches(
+            &running,
+            Some(&ContainerStatsFilter {
+                id: "c1".into(),
+                pod_sandbox_id: "other".into(),
+                ..ContainerStatsFilter::default()
+            })
+        ));
+    }
+
+    #[test]
+    fn metric_descriptors_are_stable() {
+        let descriptors = metric_descriptors();
+        assert!(
+            descriptors
+                .iter()
+                .any(|d| d.name == "container_cpu_usage_seconds_total")
+        );
+        assert!(descriptors.iter().any(|d| d.name.contains("memory")));
+    }
 }

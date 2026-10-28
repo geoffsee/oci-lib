@@ -142,4 +142,57 @@ mod tests {
             crate::ErrorCode::InvalidArgument
         );
     }
+
+    #[test]
+    fn rejects_empty_runtime_name_and_socket() {
+        let name = Config {
+            runtime_name: String::new(),
+            ..Config::default()
+        };
+        assert_eq!(
+            name.validate().unwrap_err().code(),
+            crate::ErrorCode::InvalidArgument
+        );
+        let socket = Config {
+            socket: PathBuf::new(),
+            ..Config::default()
+        };
+        assert_eq!(
+            socket.validate().unwrap_err().code(),
+            crate::ErrorCode::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn rejects_unparseable_streaming_address() {
+        let config = Config {
+            streaming_address: "not-a-host".into(),
+            streaming_port: 0,
+            ..Config::default()
+        };
+        assert_eq!(
+            config.validate().unwrap_err().code(),
+            crate::ErrorCode::InvalidArgument
+        );
+    }
+
+    #[test]
+    fn layout_helpers_nest_under_root() {
+        let config = Config {
+            root: PathBuf::from("/var/lib/oci-cri"),
+            ..Config::default()
+        };
+        assert_eq!(
+            config.sandboxes_dir(),
+            PathBuf::from("/var/lib/oci-cri/sandboxes")
+        );
+        assert_eq!(
+            config.containers_dir(),
+            PathBuf::from("/var/lib/oci-cri/containers")
+        );
+        assert_eq!(
+            config.rootfs_dir(),
+            PathBuf::from("/var/lib/oci-cri/rootfs")
+        );
+    }
 }

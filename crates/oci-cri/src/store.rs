@@ -425,4 +425,71 @@ mod tests {
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
     }
+
+    fn container(id: &str, sandbox_id: &str) -> ContainerRecord {
+        ContainerRecord {
+            id: id.into(),
+            sandbox_id: sandbox_id.into(),
+            metadata: Metadata {
+                name: "app".into(),
+                uid: String::new(),
+                namespace: String::new(),
+                attempt: 1,
+            },
+            image: "fake/app:latest".into(),
+            image_ref: String::new(),
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+            log_path: String::new(),
+            tty: false,
+            stdin: false,
+            stdin_once: false,
+            state: ContainerState::Created,
+            created_at_ns: 1,
+            started_at_ns: 0,
+            finished_at_ns: 0,
+            exit_code: -1,
+            reason: String::new(),
+            message: String::new(),
+            spec_json: String::new(),
+            rootfs: String::new(),
+            stop_signal: String::new(),
+        }
+    }
+
+    #[test]
+    fn containers_in_filters_by_sandbox() {
+        let dir = std::env::temp_dir().join(format!("rok-store-{}", new_id()));
+        let store = Store::open(dir.join("sb"), dir.join("ct")).unwrap();
+        store.put_sandbox(sandbox("sb-a")).unwrap();
+        store.put_sandbox(sandbox("sb-b")).unwrap();
+        store.put_container(container("c1", "sb-a")).unwrap();
+        store.put_container(container("c2", "sb-a")).unwrap();
+        store.put_container(container("c3", "sb-b")).unwrap();
+        let in_a = store.containers_in("sb-a");
+        assert_eq!(in_a.len(), 2);
+        assert!(in_a.iter().all(|c| c.sandbox_id == "sb-a"));
+        store.remove_container("c1").unwrap();
+        assert!(store.container("c1").is_none());
+        assert_eq!(store.containers_in("sb-a").len(), 1);
+        // Removing an absent record is fine.
+        store.remove_container("missing").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skips_non_json_and_survives_reload_after_delete() {
+        let dir = std::env::temp_dir().join(format!("rok-store-{}", new_id()));
+        let sb = dir.join("sb");
+        let ct = dir.join("ct");
+        let store = Store::open(sb.clone(), ct.clone()).unwrap();
+        store.put_sandbox(sandbox("keep")).unwrap();
+        std::fs::write(sb.join("notes.txt"), "ignore me").unwrap();
+        store.reload().unwrap();
+        assert_eq!(store.sandboxes().len(), 1);
+        store.remove_sandbox("keep").unwrap();
+        store.reload().unwrap();
+        assert!(store.sandboxes().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

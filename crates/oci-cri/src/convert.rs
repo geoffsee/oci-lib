@@ -516,5 +516,168 @@ mod tests {
         assert_eq!(spec["process"]["user"]["uid"], json!(1000));
         assert_eq!(spec["process"]["user"]["gid"], json!(1001));
         assert_eq!(spec["root"]["readonly"], json!(true));
+        assert_eq!(spec["process"]["user"]["additionalGids"], json!([27]));
+    }
+
+    #[test]
+    fn rejects_a_container_with_no_image() {
+        let mut config = config();
+        config.image = None;
+        let err = container_spec(
+            &config,
+            "/rootfs",
+            Some(&image()),
+            &NamespacePaths::default(),
+            "pod",
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn parse_user_accepts_uid_gid_and_non_numeric() {
+        assert_eq!(parse_user("1000:1001"), (1000, 1001, vec![]));
+        assert_eq!(parse_user("42"), (42, 0, vec![]));
+        assert_eq!(parse_user("nobody"), (0, 0, vec![]));
+        assert_eq!(parse_user(""), (0, 0, vec![]));
+    }
+
+    #[test]
+    fn sandbox_host_network_omits_network_namespace() {
+        use crate::api::{
+            LinuxPodSandboxConfig, LinuxSandboxSecurityContext, NamespaceOption, PodSandboxMetadata,
+        };
+        let config = PodSandboxConfig {
+            metadata: Some(PodSandboxMetadata {
+                name: "hostnet".into(),
+                ..PodSandboxMetadata::default()
+            }),
+            linux: Some(LinuxPodSandboxConfig {
+                security_context: Some(LinuxSandboxSecurityContext {
+                    namespace_options: Some(NamespaceOption {
+                        network: NamespaceMode::Node as i32,
+                        ..NamespaceOption::default()
+                    }),
+                    ..LinuxSandboxSecurityContext::default()
+                }),
+                ..LinuxPodSandboxConfig::default()
+            }),
+            ..PodSandboxConfig::default()
+        };
+        let spec: Value =
+            serde_json::from_str(&sandbox_spec(&config, "/rootfs", None, "hostnet").unwrap())
+                .unwrap();
+        let namespaces = spec["linux"]["namespaces"].as_array().unwrap();
+        assert!(namespaces.iter().all(|ns| ns["type"] != "network"));
+        assert_eq!(spec["process"]["args"], json!(["/pause"]));
+    }
+
+    #[test]
+    fn resources_json_emits_cpu_memory_and_hugepages() {
+        use crate::api::HugepageLimit;
+        use std::collections::HashMap;
+        let resources = LinuxContainerResources {
+            cpu_shares: 1024,
+            cpu_period: 100_000,
+            cpu_quota: 50_000,
+            cpuset_cpus: "0-1".into(),
+            cpuset_mems: "0".into(),
+            memory_limit_in_bytes: 256 * 1024 * 1024,
+            memory_swap_limit_in_bytes: 512 * 1024 * 1024,
+            hugepage_limits: vec![HugepageLimit {
+                page_size: "2MB".into(),
+                limit: 4,
+            }],
+            unified: HashMap::from([("memory.min".into(), "1M".into())]),
+            ..LinuxContainerResources::default()
+        };
+        let value = resources_json(&resources);
+        assert_eq!(value["cpu"]["shares"], json!(1024));
+        assert_eq!(value["cpu"]["cpus"], json!("0-1"));
+        assert_eq!(value["memory"]["limit"], json!(256 * 1024 * 1024));
+        assert_eq!(value["hugepageLimits"][0]["pageSize"], json!("2MB"));
+        assert_eq!(value["unified"]["memory.min"], json!("1M"));
+        assert!(
+            resources_json(&LinuxContainerResources::default())
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn mount_propagation_and_host_pid_shape_the_spec() {
+        use crate::api::{MountPropagation, NamespaceOption};
+        let mut config = config();
+        config.mounts = vec![Mount {
+            container_path: "/shared".into(),
+            host_path: "/host/shared".into(),
+            readonly: false,
+            propagation: MountPropagation::PropagationBidirectional as i32,
+            ..Mount::default()
+        }];
+        config.linux = Some(LinuxContainerConfig {
+            security_context: Some(LinuxContainerSecurityContext {
+                namespace_options: Some(NamespaceOption {
+                    pid: NamespaceMode::Node as i32,
+                    network: NamespaceMode::Pod as i32,
+                    ..NamespaceOption::default()
+                }),
+                ..LinuxContainerSecurityContext::default()
+            }),
+            ..LinuxContainerConfig::default()
+        });
+        let namespaces = NamespacePaths {
+            network: Some("/proc/1/ns/net".into()),
+            ..NamespacePaths::default()
+        };
+        let spec: Value = serde_json::from_str(
+            &container_spec(&config, "/rootfs", Some(&image()), &namespaces, "pod").unwrap(),
+        )
+        .unwrap();
+        let mounts = spec["mounts"].as_array().unwrap();
+        let shared = mounts
+            .iter()
+            .find(|m| m["destination"] == "/shared")
+            .unwrap();
+        assert!(
+            shared["options"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|o| o == "rshared")
+        );
+        let ns = spec["linux"]["namespaces"].as_array().unwrap();
+        assert!(
+            ns.iter()
+                .any(|n| n["type"] == "network" && n["path"] == "/proc/1/ns/net")
+        );
+        assert!(ns.iter().all(|n| n["type"] != "pid"));
+    }
+
+    #[test]
+    fn working_dir_override_and_image_volumes() {
+        let mut config = config();
+        config.working_dir = "/work".into();
+        let mut image = image();
+        image.volumes.insert("/var/data".into(), String::new());
+        let spec: Value = serde_json::from_str(
+            &container_spec(
+                &config,
+                "/rootfs",
+                Some(&image),
+                &NamespacePaths::default(),
+                "pod",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(spec["process"]["cwd"], json!("/work"));
+        let mounts = spec["mounts"].as_array().unwrap();
+        let volume = mounts
+            .iter()
+            .find(|m| m["destination"] == "/var/data")
+            .unwrap();
+        assert_eq!(volume["type"], json!("tmpfs"));
     }
 }

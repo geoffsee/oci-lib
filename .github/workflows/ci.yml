@@ -156,8 +156,8 @@ jobs:
           critest --version || true
       - name: Build oci-cri
         run: cargo build --locked -p oci-cri
-      - name: CRI lifecycle + streaming tests (fake engine)
-        run: cargo test -p oci-cri --features test-support --locked --test cri_lifecycle --test streaming_exec
+      - name: CRI lifecycle + API coverage + streaming tests (fake engine)
+        run: cargo test -p oci-cri --features test-support --locked --test cri_lifecycle --test cri_api_coverage --test streaming_exec
       - name: CRI conformance (crictl smoke + critest)
         run: |
           set -euo pipefail

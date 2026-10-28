@@ -208,3 +208,71 @@ impl ImageService for CriService {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(tag: &str) -> EngineImage {
+        EngineImage {
+            id: "sha256:abc".into(),
+            repo_tags: vec![tag.into()],
+            repo_digests: vec![format!("{tag}@sha256:abc")],
+            size: 42,
+            ..EngineImage::default()
+        }
+    }
+
+    #[test]
+    fn filter_matches_id_tag_or_digest() {
+        let image = sample("example/app:latest");
+        assert!(matches(&image, None));
+        assert!(matches(
+            &image,
+            Some(&ImageFilter {
+                image: Some(ImageSpec {
+                    image: "sha256:abc".into(),
+                    ..ImageSpec::default()
+                }),
+            })
+        ));
+        assert!(matches(
+            &image,
+            Some(&ImageFilter {
+                image: Some(ImageSpec {
+                    image: "example/app:latest".into(),
+                    ..ImageSpec::default()
+                }),
+            })
+        ));
+        assert!(matches(
+            &image,
+            Some(&ImageFilter {
+                image: Some(ImageSpec {
+                    image: "example/app:latest@sha256:abc".into(),
+                    ..ImageSpec::default()
+                }),
+            })
+        ));
+        assert!(!matches(
+            &image,
+            Some(&ImageFilter {
+                image: Some(ImageSpec {
+                    image: "other:latest".into(),
+                    ..ImageSpec::default()
+                }),
+            })
+        ));
+    }
+
+    #[test]
+    fn to_image_fills_spec_from_first_tag() {
+        let mut engine_image = sample("registry.example/app:1");
+        engine_image.spec = Some(crate::engine::ImageSpec::default());
+        let image = to_image(&engine_image);
+        assert_eq!(image.id, "sha256:abc");
+        assert_eq!(image.size, 42);
+        assert_eq!(image.repo_tags, ["registry.example/app:1"]);
+        assert_eq!(image.spec.as_ref().unwrap().image, "registry.example/app:1");
+    }
+}
