@@ -4,9 +4,9 @@
 //!
 //! macOS reads entitlements from the code signature, so a binary built
 //! outside this repo's cargo wrappers (`cargo install`, a dependent crate)
-//! has none and cannot boot the guest. `startup` signs the executable ad hoc
+//! has none and cannot boot the guest. [`ensure`] signs the executable ad hoc
 //! with the plist below and re-executes it with the same arguments.
-//! `ROR_NO_SELF_SIGN=1` turns that off.
+//! Product crates pass their `*_NO_SELF_SIGN` env var name to turn that off.
 
 use std::ffi::c_void;
 use std::os::unix::process::CommandExt;
@@ -18,7 +18,7 @@ use std::{env, fs};
 use objc2::rc::Retained;
 use objc2_foundation::NSString;
 
-use crate::error::{Error, ErrorCode};
+use crate::vm::error::{VmError, VmErrorKind};
 
 const ENTITLEMENT: &str = "com.apple.security.virtualization";
 
@@ -53,7 +53,7 @@ unsafe extern "C" {
 }
 
 /// Whether the running process carries the entitlement.
-pub(crate) fn present() -> bool {
+pub fn present() -> bool {
     unsafe {
         let task = SecTaskCreateFromSelf(std::ptr::null());
         if task.is_null() {
@@ -72,13 +72,17 @@ pub(crate) fn present() -> bool {
 }
 
 /// Sign the executable and re-execute it when the entitlement is missing.
-/// Returns only when nothing needed doing or signing was not possible; the
-/// guest boot then reports the missing entitlement.
-pub(crate) fn ensure() {
+///
+/// `no_self_sign_env` is the product-specific kill switch (`ROR_NO_SELF_SIGN`,
+/// `ROB_NO_SELF_SIGN`, …). Returns only when nothing needed doing or signing
+/// was not possible; the guest boot then reports the missing entitlement.
+pub fn ensure(no_self_sign_env: &str) {
     static ONCE: Once = Once::new();
+    if present() || env::var_os(no_self_sign_env).is_some() || env::var_os(RESIGNED).is_some() {
+        return;
+    }
     ONCE.call_once(|| {
-        if present() || env::var_os("ROR_NO_SELF_SIGN").is_some() || env::var_os(RESIGNED).is_some()
-        {
+        if present() {
             return;
         }
         let Ok(exe) = env::current_exe() else {
@@ -129,16 +133,16 @@ fn plist_file() -> std::io::Result<PathBuf> {
 }
 
 /// The error a boot returns without the entitlement, with the command that
-/// fixes it.
-pub(crate) fn missing() -> Error {
+/// fixes it. `no_self_sign_env` is named in the detail string.
+pub fn missing(no_self_sign_env: &str) -> VmError {
     let exe = env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "<binary>".into());
-    Error::new(
-        ErrorCode::Prerequisite,
+    VmError::with_detail(
+        VmErrorKind::Prerequisite,
         format!("this binary lacks the {ENTITLEMENT} entitlement"),
         format!(
-            "startup() could not sign it (or ROR_NO_SELF_SIGN is set). Sign it with an entitlements plist that sets {ENTITLEMENT} to true:\n  codesign --force --sign - --entitlements entitlements.plist {exe}"
+            "startup() could not sign it (or {no_self_sign_env} is set). Sign it with an entitlements plist that sets {ENTITLEMENT} to true:\n  codesign --force --sign - --entitlements entitlements.plist {exe}"
         ),
     )
 }

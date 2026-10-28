@@ -8,41 +8,29 @@
 
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
-use std::os::unix::fs::PermissionsExt;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
-use std::{env, sync::Mutex as StdMutex};
 
-use crate::proto as rob_proto;
-use crate::proto::{GuestFrame, HostFrame, Init, VSOCK_PORT, read_guest_frame, write_host_frame};
-use block2::RcBlock;
-use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
-use libc::c_int;
-use objc2::AnyThread;
+use dispatch2::DispatchQueue;
+use dispatch2::DispatchRetained;
 use objc2::rc::Retained;
-use objc2_foundation::{NSArray, NSError, NSFileHandle, NSString, NSURL};
-use objc2_virtualization::{
-    VZDirectorySharingDeviceConfiguration, VZEntropyDeviceConfiguration,
-    VZFileHandleSerialPortAttachment, VZGenericPlatformConfiguration, VZLinuxBootLoader,
-    VZNATNetworkDeviceAttachment, VZNetworkDeviceConfiguration, VZSerialPortConfiguration,
-    VZVirtioConsoleDeviceSerialPortConfiguration, VZVirtioEntropyDeviceConfiguration,
-    VZVirtioFileSystemDeviceConfiguration, VZVirtioNetworkDeviceConfiguration,
-    VZVirtioSocketDevice, VZVirtioSocketDeviceConfiguration, VZVirtualMachine,
-    VZVirtualMachineConfiguration,
+use objc2_virtualization::VZVirtualMachine;
+use oci_util::vm::{
+    Export, ShareRequest, VmError, VmErrorKind, guest_path, lines_from_attestation,
+    materialize_embedded, plan_shares, start_vm, stop_virtual_machine, virtualization_supported,
+    wait_readable,
 };
 
 use crate::builder::{BuildRequest, CancelToken, ImageInfo, LogRecord, LogStream, PreparedPaths};
 use crate::config::{Config, EngineHost, ImageFormat, StorageDriver};
 use crate::error::{Error, ErrorCode};
-use crate::shares::{Export, ShareRequest, guest_path, plan_shares};
-
-const BOOT_TIMEOUT: Duration = Duration::from_secs(30);
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+use crate::guest_config::GUEST;
+use crate::proto as rob_proto;
+use crate::proto::{
+    GuestFrame, HostFrame, Init, PROTOCOL_VERSION, read_guest_frame, write_host_frame,
+};
 
 struct Shared {
     jobs: std::sync::mpsc::Sender<Job>,
@@ -84,8 +72,10 @@ pub(crate) fn open(mut config: Config) -> Result<(), Error> {
             "Apple Virtualization.framework is not available on this Mac",
         ));
     }
-    if !crate::entitlement::present() {
-        return Err(crate::entitlement::missing());
+    if !oci_util::vm::entitlement_present() {
+        return Err(map_vm(oci_util::vm::missing_entitlement(
+            GUEST.no_self_sign_env,
+        )));
     }
     config.signature_policy =
         crate::policy::effective_signature_policy(config.signature_policy.as_deref())?;
@@ -101,7 +91,7 @@ pub(crate) fn open(mut config: Config) -> Result<(), Error> {
     let early_worker = Arc::clone(&early_cancel);
     let config_worker = config.clone();
     let join = thread::Builder::new()
-        .name("oci-builder-guest".into())
+        .name(GUEST.thread_name.into())
         .spawn(move || {
             worker(
                 rx,
@@ -276,11 +266,11 @@ pub(crate) fn diagnose() -> Result<String, Error> {
         lines
             .push("[fail] Apple Virtualization.framework is not available on this Mac".to_string());
     }
-    if crate::entitlement::present() {
+    if oci_util::vm::entitlement_present() {
         lines.push("[ok] com.apple.security.virtualization entitlement".to_string());
     } else {
         blocked = true;
-        let err = crate::entitlement::missing();
+        let err = map_vm(oci_util::vm::missing_entitlement(GUEST.no_self_sign_env));
         lines.push(format!("[fail] {}", err.message()));
         lines.push(err.detail().to_string());
     }
@@ -300,9 +290,7 @@ pub(crate) fn diagnose() -> Result<String, Error> {
             }
         }
     }
-    lines.extend(crate::guest_record::lines_from_attestation(
-        EMBEDDED_ATTESTATION,
-    ));
+    lines.extend(lines_from_attestation(EMBEDDED_ATTESTATION));
     let status = if blocked { "blocked" } else { "ready" };
     let mut report = format!("status: {status}\n");
     report.push_str(&lines.join("\n"));
@@ -724,97 +712,46 @@ fn boot(
     exports: &[Export],
     write: &Arc<Mutex<Option<File>>>,
 ) -> Result<Guest, Error> {
-    let queue = DispatchQueue::new("oci-builder.vm", DispatchQueueAttr::SERIAL);
-    let (console_read, config) = vm_config(kernel, initrd, exports)?;
-    let console = spawn_console(console_read);
-    // The virtual machine object is not Send. Create it on its queue and move
-    // only the raw pointer back to this thread. Every method call goes back
-    // onto that queue.
-    let config_ptr = Retained::as_ptr(&config) as usize;
-    let queue_ptr = &*queue as *const DispatchQueue as usize;
-    let vm_slot = Arc::new(AtomicPtr::new(std::ptr::null_mut()));
-    let vm_slot_queue = Arc::clone(&vm_slot);
-    queue.exec_sync(move || {
-        let config = unsafe { &*(config_ptr as *const VZVirtualMachineConfiguration) };
-        let queue_ref = unsafe { &*(queue_ptr as *const DispatchQueue) };
-        let vm = unsafe {
-            VZVirtualMachine::initWithConfiguration_queue(
-                VZVirtualMachine::alloc(),
-                config,
-                queue_ref,
-            )
-        };
-        vm_slot_queue.store(Retained::into_raw(vm), Ordering::SeqCst);
-    });
-    let vm = unsafe { Retained::from_raw(vm_slot.load(Ordering::SeqCst)) }
-        .ok_or_else(|| fail(ErrorCode::Internal, "virtual machine was not created"))?;
-    let vm_ptr = Retained::as_ptr(&vm) as usize;
-    wait_on_queue(&queue, BOOT_TIMEOUT, move |done| {
-        let vm = unsafe { &*(vm_ptr as *const VZVirtualMachine) };
-        let once = StdMutex::new(Some(done));
-        unsafe {
-            vm.startWithCompletionHandler(&RcBlock::new(move |err: *mut NSError| {
-                if let Some(done) = once
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner())
-                    .take()
-                {
-                    done(ns_result(err));
-                }
-            }));
-        }
-    })?;
-    let fd = connect_vsock(vm_ptr, &queue)?;
-    prepare_fd(fd);
-    let write_fd = unsafe { libc::dup(fd) };
-    if write_fd < 0 {
-        unsafe { libc::close(fd) };
-        return Err(io_err(io::Error::last_os_error()));
-    }
-    prepare_fd(write_fd);
-    let read = unsafe { File::from(OwnedFd::from_raw_fd(fd)) };
-    let write_file = unsafe { File::from(OwnedFd::from_raw_fd(write_fd)) };
-    *write.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(write_file);
-    let mut started = Guest {
-        vm,
-        queue,
-        _console: console,
-        read,
+    let started = start_vm(&GUEST, kernel, initrd, exports).map_err(map_vm)?;
+    *write.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(started.write);
+    let mut guest = Guest {
+        vm: started.vm,
+        queue: started.queue,
+        _console: started.console,
+        read: started.read,
         exports: exports.to_vec(),
     };
-    if let Err(err) = handshake(&mut started.read, write) {
-        started.stop();
+    if let Err(err) = handshake(&mut guest.read, write) {
+        guest.stop();
         *write.lock().unwrap_or_else(|poison| poison.into_inner()) = None;
         return Err(err);
     }
-    Ok(started)
+    Ok(guest)
 }
 
 fn handshake(read: &mut File, write: &Arc<Mutex<Option<File>>>) -> Result<(), Error> {
     write_locked(
         write,
         &HostFrame::Hello {
-            protocol: rob_proto::PROTOCOL_VERSION,
+            protocol: PROTOCOL_VERSION,
         },
     )?;
-    wait_readable(read, HANDSHAKE_TIMEOUT).map_err(|err| {
+    wait_readable(read, GUEST.handshake_timeout).map_err(|err| {
         Error::new(
             ErrorCode::Prerequisite,
             "guest protocol handshake failed",
             format!(
-                "host expects protocol version {}; the embedded guest did not respond: {err}. Rebuild the guest with `cargo xtask guest`.",
-                rob_proto::PROTOCOL_VERSION
+                "host expects protocol version {PROTOCOL_VERSION}; the embedded guest did not respond: {err}. Rebuild the guest with `cargo xtask guest`."
             ),
         )
     })?;
     match read_guest_frame(read) {
-        Ok(GuestFrame::Hello { protocol }) if protocol == rob_proto::PROTOCOL_VERSION => Ok(()),
+        Ok(GuestFrame::Hello { protocol }) if protocol == PROTOCOL_VERSION => Ok(()),
         Ok(GuestFrame::Hello { protocol }) => Err(Error::new(
             ErrorCode::Prerequisite,
             "guest protocol mismatch",
             format!(
-                "host expects protocol version {}, guest implements {protocol}; rebuild the guest with `cargo xtask guest`",
-                rob_proto::PROTOCOL_VERSION
+                "host expects protocol version {PROTOCOL_VERSION}, guest implements {protocol}; rebuild the guest with `cargo xtask guest`"
             ),
         )),
         Ok(GuestFrame::Error {
@@ -831,341 +768,16 @@ fn handshake(read: &mut File, write: &Arc<Mutex<Option<File>>>) -> Result<(), Er
             ErrorCode::Prerequisite,
             "guest protocol handshake failed",
             format!(
-                "host expects protocol version {}; guest closed or rejected the handshake: {err}. Rebuild the guest with `cargo xtask guest`.",
-                rob_proto::PROTOCOL_VERSION
+                "host expects protocol version {PROTOCOL_VERSION}; guest closed or rejected the handshake: {err}. Rebuild the guest with `cargo xtask guest`."
             ),
         )),
     }
 }
 
-fn wait_readable(file: &File, timeout: Duration) -> io::Result<()> {
-    let mut poll = libc::pollfd {
-        fd: file.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let millis = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
-    let result = unsafe { libc::poll(&mut poll, 1, millis) };
-    if result < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    if result == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "timed out waiting for guest protocol handshake",
-        ));
-    }
-    if poll.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "guest socket closed during protocol handshake",
-        ));
-    }
-    Ok(())
-}
-
-fn connect_vsock(vm_ptr: usize, queue: &DispatchQueue) -> Result<c_int, Error> {
-    // One connect at a time. The guest accepts a single socket; abandoning an
-    // in-flight connect would leave it talking to a descriptor this side dropped.
-    let deadline = Instant::now() + BOOT_TIMEOUT;
-    let mut last = String::from("guest has not opened the virtio socket");
-    while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let attempt = wait_on_queue(queue, remaining, move |done| {
-            let vm = unsafe { &*(vm_ptr as *const VZVirtualMachine) };
-            let once = StdMutex::new(Some(done));
-            unsafe {
-                let devices = vm.socketDevices();
-                if devices.count() == 0 {
-                    if let Some(done) = once
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .take()
-                    {
-                        done(Err("virtual machine has no virtio socket device".into()));
-                    }
-                    return;
-                }
-                let device = devices.objectAtIndex(0);
-                let Ok(socket) = device.downcast::<VZVirtioSocketDevice>() else {
-                    if let Some(done) = once
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .take()
-                    {
-                        done(Err("socket device is not a virtio socket".into()));
-                    }
-                    return;
-                };
-                socket.connectToPort_completionHandler(
-                    VSOCK_PORT,
-                    &RcBlock::new(
-                        move |conn: *mut objc2_virtualization::VZVirtioSocketConnection,
-                              err: *mut NSError| {
-                            let Some(done) = once
-                                .lock()
-                                .unwrap_or_else(|poison| poison.into_inner())
-                                .take()
-                            else {
-                                return;
-                            };
-                            if conn.is_null() {
-                                done(Err(ns_message(err)));
-                                return;
-                            }
-                            let raw = (*conn).fileDescriptor();
-                            if raw < 0 {
-                                done(Err("virtio socket connection is closed".into()));
-                                return;
-                            }
-                            let fd = libc::dup(raw);
-                            if fd < 0 {
-                                done(Err(io::Error::last_os_error().to_string()));
-                            } else {
-                                done(Ok(fd));
-                            }
-                        },
-                    ),
-                );
-            }
-        });
-        match attempt {
-            Ok(fd) => return Ok(fd),
-            Err(err) if err.message() == "timed out waiting for the virtual machine" => {
-                return Err(fail(ErrorCode::Prerequisite, last));
-            }
-            Err(err) => {
-                last = err.message().to_string();
-                thread::sleep(Duration::from_millis(200));
-            }
-        }
-    }
-    Err(fail(ErrorCode::Prerequisite, last))
-}
-
-fn wait_on_queue<T, F>(queue: &DispatchQueue, timeout: Duration, start: F) -> Result<T, Error>
-where
-    T: Send + 'static,
-    F: FnOnce(Box<dyn FnOnce(Result<T, String>) + Send>) + Send + 'static,
-{
-    let (tx, rx) = std::sync::mpsc::channel();
-    queue.exec_async(move || {
-        let tx = tx;
-        start(Box::new(move |result| {
-            let _ = tx.send(result);
-        }));
-    });
-    match rx.recv_timeout(timeout) {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(message)) => Err(fail(ErrorCode::Prerequisite, message)),
-        Err(_) => Err(fail(
-            ErrorCode::Prerequisite,
-            "timed out waiting for the virtual machine",
-        )),
-    }
-}
-
-fn vm_config(
-    kernel: &Path,
-    initrd: &Path,
-    exports: &[Export],
-) -> Result<(OwnedFd, Retained<VZVirtualMachineConfiguration>), Error> {
-    let config = unsafe { VZVirtualMachineConfiguration::new() };
-    let kernel_url = file_url(kernel)?;
-    let initrd_url = file_url(initrd)?;
-    let loader =
-        unsafe { VZLinuxBootLoader::initWithKernelURL(VZLinuxBootLoader::alloc(), &kernel_url) };
-    unsafe {
-        loader.setInitialRamdiskURL(Some(&initrd_url));
-        loader.setCommandLine(&NSString::from_str(
-            "console=hvc0 reboot=k panic=1 init=/init",
-        ));
-        config.setBootLoader(Some(&loader));
-        config.setPlatform(&VZGenericPlatformConfiguration::new());
-    }
-    let cpu = {
-        let min = unsafe { VZVirtualMachineConfiguration::minimumAllowedCPUCount() };
-        let max = unsafe { VZVirtualMachineConfiguration::maximumAllowedCPUCount() };
-        2.clamp(min, max)
-    };
-    let memory = {
-        let min = unsafe { VZVirtualMachineConfiguration::minimumAllowedMemorySize() };
-        let max = unsafe { VZVirtualMachineConfiguration::maximumAllowedMemorySize() };
-        (1024 * 1024 * 1024).clamp(min, max)
-    };
-    unsafe {
-        config.setCPUCount(cpu);
-        config.setMemorySize(memory);
-    }
-
-    let entropy = unsafe { VZVirtioEntropyDeviceConfiguration::new() };
-    let entropy_ref: &VZEntropyDeviceConfiguration = &entropy;
-    unsafe { config.setEntropyDevices(&NSArray::from_slice(&[entropy_ref])) };
-
-    let nat = unsafe { VZNATNetworkDeviceAttachment::new() };
-    let nic = unsafe { VZVirtioNetworkDeviceConfiguration::new() };
-    unsafe { nic.setAttachment(Some(&nat)) };
-    let nic_ref: &VZNetworkDeviceConfiguration = &nic;
-    unsafe { config.setNetworkDevices(&NSArray::from_slice(&[nic_ref])) };
-
-    let socket = unsafe { VZVirtioSocketDeviceConfiguration::new() };
-    let socket_ref: &objc2_virtualization::VZSocketDeviceConfiguration = &socket;
-    unsafe { config.setSocketDevices(&NSArray::from_slice(&[socket_ref])) };
-
-    let mut directories = Vec::new();
-    for export in exports {
-        let host_url = file_url(&export.host)?;
-        let shared = unsafe {
-            objc2_virtualization::VZSharedDirectory::initWithURL_readOnly(
-                objc2_virtualization::VZSharedDirectory::alloc(),
-                &host_url,
-                export.read_only,
-            )
-        };
-        let share = unsafe {
-            objc2_virtualization::VZSingleDirectoryShare::initWithDirectory(
-                objc2_virtualization::VZSingleDirectoryShare::alloc(),
-                &shared,
-            )
-        };
-        let device = unsafe {
-            VZVirtioFileSystemDeviceConfiguration::initWithTag(
-                VZVirtioFileSystemDeviceConfiguration::alloc(),
-                &NSString::from_str(export.tag),
-            )
-        };
-        unsafe { device.setShare(Some(&share)) };
-        directories.push(device);
-    }
-    let directory_refs: Vec<&VZDirectorySharingDeviceConfiguration> =
-        directories.iter().map(|device| device as _).collect();
-    unsafe { config.setDirectorySharingDevices(&NSArray::from_slice(&directory_refs)) };
-
-    let (console_read, console_write) = anon_pipe()?;
-    let null = File::open("/dev/null").map_err(io_err)?;
-    let stdin = NSFileHandle::initWithFileDescriptor_closeOnDealloc(
-        NSFileHandle::alloc(),
-        null.into_raw_fd(),
-        true,
-    );
-    let stdout = NSFileHandle::initWithFileDescriptor_closeOnDealloc(
-        NSFileHandle::alloc(),
-        console_write.into_raw_fd(),
-        true,
-    );
-    let attachment = unsafe {
-        VZFileHandleSerialPortAttachment::initWithFileHandleForReading_fileHandleForWriting(
-            VZFileHandleSerialPortAttachment::alloc(),
-            Some(&stdin),
-            Some(&stdout),
-        )
-    };
-    let port = unsafe { VZVirtioConsoleDeviceSerialPortConfiguration::new() };
-    unsafe { port.setAttachment(Some(&attachment)) };
-    let port_ref: &VZSerialPortConfiguration = &port;
-    unsafe { config.setSerialPorts(&NSArray::from_slice(&[port_ref])) };
-
-    unsafe { config.validateWithError() }
-        .map_err(|err| fail(ErrorCode::Prerequisite, ns_error_text(&err)))?;
-    Ok((console_read, config))
-}
-
 impl Guest {
     fn stop(self) {
-        let vm_ptr = Retained::as_ptr(&self.vm) as usize;
-        let _ = wait_on_queue(&self.queue, Duration::from_secs(10), move |done| {
-            let vm = unsafe { &*(vm_ptr as *const VZVirtualMachine) };
-            let once = StdMutex::new(Some(done));
-            unsafe {
-                vm.stopWithCompletionHandler(&RcBlock::new(move |_err: *mut NSError| {
-                    if let Some(done) = once
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .take()
-                    {
-                        done(Ok(()));
-                    }
-                }));
-            }
-        });
+        stop_virtual_machine(self.vm, &self.queue);
     }
-}
-
-fn spawn_console(fd: OwnedFd) -> JoinHandle<()> {
-    thread::Builder::new()
-        .name("oci-builder-console".into())
-        .spawn(move || {
-            let mut file = File::from(fd);
-            let mut buf = [0u8; 4096];
-            loop {
-                match file.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let mut err = io::stderr().lock();
-                        let _ = err.write_all(&buf[..n]);
-                        let _ = err.flush();
-                    }
-                }
-            }
-        })
-        .expect("console thread")
-}
-
-fn anon_pipe() -> Result<(OwnedFd, OwnedFd), Error> {
-    let mut fds = [0; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return Err(io_err(io::Error::last_os_error()));
-    }
-    Ok((unsafe { OwnedFd::from_raw_fd(fds[0]) }, unsafe {
-        OwnedFd::from_raw_fd(fds[1])
-    }))
-}
-
-fn prepare_fd(fd: c_int) {
-    unsafe {
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        if flags >= 0 {
-            libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
-        }
-        let fd_flags = libc::fcntl(fd, libc::F_GETFD);
-        if fd_flags >= 0 {
-            libc::fcntl(fd, libc::F_SETFD, fd_flags | libc::FD_CLOEXEC);
-        }
-    }
-}
-
-fn file_url(path: &Path) -> Result<Retained<NSURL>, Error> {
-    let text = path.to_str().ok_or_else(|| {
-        fail(
-            ErrorCode::InvalidArgument,
-            format!("path is not valid Unicode: {}", path.display()),
-        )
-    })?;
-    Ok(NSURL::fileURLWithPath(&NSString::from_str(text)))
-}
-
-fn virtualization_supported() -> bool {
-    unsafe { VZVirtualMachine::isSupported() }
-}
-
-fn ns_result(err: *mut NSError) -> Result<(), String> {
-    if err.is_null() {
-        Ok(())
-    } else {
-        Err(ns_message(err))
-    }
-}
-
-fn ns_message(err: *mut NSError) -> String {
-    if err.is_null() {
-        "virtual machine failed".to_string()
-    } else {
-        ns_error_text(unsafe { &*err })
-    }
-}
-
-fn ns_error_text(err: &NSError) -> String {
-    err.localizedDescription().to_string()
 }
 
 const EMBEDDED_KERNEL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rob-guest-vmlinuz.zst"));
@@ -1173,70 +785,18 @@ const EMBEDDED_INITRD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rob-gue
 const EMBEDDED_ATTESTATION: &str =
     include_str!(concat!(env!("OUT_DIR"), "/rob-guest-attestation.json"));
 
-/// The guest always boots from the images embedded at build time. They are
-/// written to the cache directory because the boot loader takes file URLs.
 fn locate_artifacts() -> Result<(PathBuf, PathBuf), Error> {
-    materialize_embedded()
+    materialize_embedded(&GUEST, EMBEDDED_KERNEL, EMBEDDED_INITRD).map_err(map_vm)
 }
 
-fn materialize_embedded() -> Result<(PathBuf, PathBuf), Error> {
-    let dir = guest_cache_dir().join(format!(
-        "{}-{}",
-        EMBEDDED_KERNEL.len(),
-        EMBEDDED_INITRD.len()
-    ));
-    let kernel = dir.join("vmlinuz");
-    let initrd = dir.join("initramfs");
-    write_embedded(&kernel, &decompress(EMBEDDED_KERNEL)?)?;
-    write_embedded(&initrd, &decompress(EMBEDDED_INITRD)?)?;
-    Ok((kernel, initrd))
-}
-
-fn decompress(bytes: &[u8]) -> Result<Vec<u8>, Error> {
-    zstd::decode_all(bytes).map_err(|err| {
-        fail(
-            ErrorCode::Internal,
-            format!("decompressing the embedded guest: {err}"),
-        )
-    })
-}
-
-fn guest_cache_dir() -> PathBuf {
-    match env::var("HOME") {
-        Ok(home) if !home.is_empty() => PathBuf::from(home).join("Library/Caches/oci-builder"),
-        // A per-uid directory, not a shared /tmp name another account can pre-create.
-        _ => env::temp_dir().join(format!("oci-builder-guest-{}", unsafe { libc::getuid() })),
-    }
-}
-
-fn write_embedded(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    if let Ok(existing) = std::fs::read(path) {
-        if existing == bytes {
-            return Ok(());
-        }
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            fail(
-                ErrorCode::Internal,
-                format!("creating {}: {err}", parent.display()),
-            )
-        })?;
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-    }
-    let tmp = path.with_extension("partial");
-    std::fs::write(&tmp, bytes).map_err(|err| {
-        fail(
-            ErrorCode::Internal,
-            format!("writing {}: {err}", tmp.display()),
-        )
-    })?;
-    std::fs::rename(&tmp, path).map_err(|err| {
-        fail(
-            ErrorCode::Internal,
-            format!("renaming {} to {}: {err}", tmp.display(), path.display()),
-        )
-    })
+fn map_vm(err: VmError) -> Error {
+    let code = match err.kind {
+        VmErrorKind::InvalidArgument => ErrorCode::InvalidArgument,
+        VmErrorKind::Prerequisite => ErrorCode::Prerequisite,
+        VmErrorKind::State => ErrorCode::State,
+        VmErrorKind::Internal => ErrorCode::Internal,
+    };
+    Error::new(code, err.message, err.detail)
 }
 
 fn io_err(err: io::Error) -> Error {

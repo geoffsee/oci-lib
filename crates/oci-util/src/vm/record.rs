@@ -2,21 +2,14 @@
 
 //! Diagnose lines for the guest attestation embedded next to the kernel.
 
-#[path = "guest_attest.rs"]
-mod attest;
-
-// The build script compiles the checker on its own. Tests compile it here so
-// the version gate and hash compare are exercised without booting a guest.
-#[cfg(test)]
-#[path = "guest_check.rs"]
-mod check;
+use crate::vm::attest;
 
 /// Kernel sha256, initramfs sha256, and each attested member path.
 ///
 /// A document that does not parse becomes one `[fail]` line. Readiness stays
 /// whatever the rest of diagnose already decided: the build refused a bad
 /// attestation before these bytes were embedded.
-pub(crate) fn lines_from_attestation(json: &str) -> Vec<String> {
+pub fn lines_from_attestation(json: &str) -> Vec<String> {
     let attestation = match attest::parse(json) {
         Ok(attestation) => attestation,
         Err(err) => return vec![format!("[fail] embedded guest attestation: {err}")],

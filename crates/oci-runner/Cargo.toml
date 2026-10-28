@@ -22,57 +22,22 @@ default = ["vm"]
 # Run the engine on macOS inside an Apple Virtualization Linux guest that is
 # embedded in the binary. Every dependency it enables is macOS-only, so other
 # platforms build nothing extra. macOS without it links the unsupported stub.
-vm = ["dep:block2", "dep:dispatch2", "dep:flate2", "dep:objc2", "dep:objc2-foundation", "dep:objc2-virtualization", "dep:zstd"]
+vm = ["dep:oci-util", "oci-util/vm", "dep:dispatch2", "dep:objc2", "dep:objc2-virtualization"]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+oci-util = { path = "../oci-util", version = "0.1.11", default-features = false, optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"
 
+# Product Guest still holds VZ handles; shared boot lives in oci-util.
 [target.'cfg(target_os = "macos")'.dependencies]
-zstd = { version = "0.14", optional = true }
-objc2 = { version = "0.6", optional = true }
-block2 = { version = "0.6", optional = true }
 dispatch2 = { version = "0.3", optional = true }
-objc2-foundation = { optional = true, version = "0.3", features = [
-    "NSArray",
-    "NSError",
-    "NSFileHandle",
-    "NSString",
-    "NSURL",
-] }
+objc2 = { version = "0.6", optional = true }
 objc2-virtualization = { optional = true, version = "0.3.2", default-features = false, features = [
     "std",
-    "block2",
-    "dispatch2",
-    "VZBootLoader",
-    "VZLinuxBootLoader",
     "VZVirtualMachine",
-    "VZVirtualMachineConfiguration",
-    "VZGenericPlatformConfiguration",
-    "VZGenericMachineIdentifier",
-    "VZPlatformConfiguration",
-    "VZVirtioFileSystemDeviceConfiguration",
-    "VZDirectoryShare",
-    "VZDirectorySharingDeviceConfiguration",
-    "VZSharedDirectory",
-    "VZSingleDirectoryShare",
-    "VZVirtioSocketDevice",
-    "VZVirtioSocketDeviceConfiguration",
-    "VZVirtioSocketConnection",
-    "VZSocketDevice",
-    "VZSocketDeviceConfiguration",
-    "VZNATNetworkDeviceAttachment",
-    "VZNetworkDeviceAttachment",
-    "VZNetworkDeviceConfiguration",
-    "VZVirtioNetworkDeviceConfiguration",
-    "VZVirtioEntropyDeviceConfiguration",
-    "VZEntropyDeviceConfiguration",
-    "VZSerialPortConfiguration",
-    "VZSerialPortAttachment",
-    "VZFileHandleSerialPortAttachment",
-    "VZVirtioConsoleDeviceSerialPortConfiguration",
 ] }
 
 [build-dependencies]
@@ -80,5 +45,4 @@ cc = "1"
 
 # Build-dependency cfgs match the build host, which is macOS when embedding the guest.
 [target.'cfg(target_os = "macos")'.build-dependencies]
-flate2 = { version = "1", optional = true }
-zstd = { version = "0.14", optional = true }
+oci-util = { path = "../oci-util", version = "0.1.11", default-features = false, features = ["guest-embed"], optional = true }

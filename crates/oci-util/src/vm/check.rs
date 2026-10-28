@@ -5,13 +5,13 @@
 //! `build.rs` compiles this file. The library compiles it only under test,
 //! because diagnose never re-checks the hashes the build already verified.
 
-use super::attest::Attestation;
+use crate::vm::attest::Attestation;
 
-pub(crate) fn version_requires_guest_attestation(version: &str) -> bool {
+pub fn version_requires_guest_attestation(version: &str) -> bool {
     compare_dotted_integers(version, "0.1.7") == std::cmp::Ordering::Greater
 }
 
-pub(crate) fn hashes_match(
+pub fn hashes_match(
     attestation: &Attestation,
     kernel_sha256: &str,
     initramfs_sha256: &str,
@@ -42,7 +42,7 @@ pub(crate) fn hashes_match(
     Ok(())
 }
 
-pub(crate) fn compatibility_match(
+pub fn compatibility_match(
     attestation: &Attestation,
     package: &str,
     package_version: &str,
@@ -81,7 +81,7 @@ pub(crate) fn compatibility_match(
 /// Releases through 0.1.7 shipped `SHA256SUMS` only. The member list is empty
 /// because those bytes were not recorded.
 #[cfg(test)]
-pub(crate) fn minimal_attestation(
+pub fn minimal_attestation(
     package: &str,
     package_version: &str,
     protocol_version: u32,
@@ -141,8 +141,8 @@ fn dotted_integers(version: &str) -> Vec<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::attest::parse;
     use super::*;
+    use crate::vm::attest::parse;
 
     #[test]
     fn attestation_is_required_only_after_0_1_7() {

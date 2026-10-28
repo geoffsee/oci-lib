@@ -14,3 +14,21 @@ algorithm checks, trust-policy evaluation, and OCI referrers selection.
 
 The caller downloads registry bytes and supplies trust anchors. A timestamp
 countersignature fails closed: this crate does not verify RFC 3161 tokens.
+
+## Feature: `guest-embed`
+
+Std-only guest attestation parse/check and the build-script helper
+`vm::embed_guest`. Product `build.rs` files call it with an `EmbedConfig`
+(env var names, `OUT_DIR` artifact names, protocol version).
+
+## Feature: `vm`
+
+macOS Virtualization host glue shared by `oci-builder` and `oci-runner`:
+
+- entitlement self-sign (`ensure_entitlement`)
+- virtiofs share planning (`Export`, `plan_shares`, `export_rootfs`)
+- guest image materialize and VZ boot/vsock (`start_vm`, `GuestConfig`)
+
+Product crates keep their own Go shims and wire protocols. A future
+`oci-cri` macOS guest should depend on this module instead of copying
+Virtualization code again; engines stay separate.
