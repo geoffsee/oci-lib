@@ -33,8 +33,11 @@ type handle struct {
 	process   *libcontainer.Process
 	stdin     io.WriteCloser
 	pumps     sync.WaitGroup
-	exitCode  int
-	done      bool
+	// Result fields are published by closing waitDone. Only one goroutine
+	// calls Process.Wait, including for sandbox init processes.
+	waitDone chan struct{}
+	waitErr  error
+	exitCode int
 }
 
 var (
@@ -260,6 +263,16 @@ func opStart(req *opRequest, hooks *ioHooks) (retErr error) {
 	}
 	_ = stdinRead.Close()
 	h.process = process
+	h.waitDone = make(chan struct{})
+	go func() {
+		state, err := process.Wait()
+		if err != nil && state == nil {
+			h.waitErr = fail(codeRun, "wait", err.Error())
+		} else {
+			h.exitCode = exitCode(state)
+		}
+		close(h.waitDone)
+	}()
 	started = true
 	return nil
 }
@@ -294,22 +307,19 @@ func opWait(req *opRequest) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if h.done {
-		return map[string]any{"exit_code": h.exitCode}, nil
+	h.startMu.Lock()
+	done := h.waitDone
+	h.startMu.Unlock()
+	if done == nil {
+		// A reloaded container is not our child; its exit code is unknown.
+		return map[string]any{"exit_code": -1}, nil
 	}
-	code := -1
-	if h.process != nil {
-		state, err := h.process.Wait()
-		// A nonzero exit (including SIGKILL) returns both state and ExitError.
-		if err != nil && state == nil {
-			return nil, fail(codeRun, "wait", err.Error())
-		}
-		code = exitCode(state)
-	}
+	<-done
 	h.pumps.Wait()
-	h.exitCode = code
-	h.done = true
-	return map[string]any{"exit_code": code}, nil
+	if h.waitErr != nil {
+		return nil, h.waitErr
+	}
+	return map[string]any{"exit_code": h.exitCode}, nil
 }
 
 func opKill(req *opRequest) error {
@@ -320,6 +330,19 @@ func opKill(req *opRequest) error {
 	signal := syscall.Signal(req.Signal)
 	if signal == 0 {
 		signal = syscall.SIGTERM
+	}
+	h.startMu.Lock()
+	defer h.startMu.Unlock()
+	if h.waitDone != nil {
+		select {
+		case <-h.waitDone:
+			return h.waitErr
+		default:
+			if err := h.process.Signal(signal); err != nil && !errors.Is(err, os.ErrProcessDone) {
+				return fail(codeRun, "signal container", err.Error())
+			}
+			return nil
+		}
 	}
 	if err := h.container.Signal(signal); err != nil {
 		// Killing an already-stopped container is not an error for CRI.
@@ -336,12 +359,19 @@ func opDelete(req *opRequest) error {
 	if err != nil {
 		return nil // already gone
 	}
-	if status, serr := h.container.Status(); serr == nil && status != libcontainer.Stopped {
-		_ = h.container.Signal(syscall.SIGKILL)
-		if h.process != nil && !h.done {
-			_, _ = h.process.Wait()
-			h.done = true
+	h.startMu.Lock()
+	defer h.startMu.Unlock()
+	if h.waitDone != nil {
+		select {
+		case <-h.waitDone:
+		default:
+			if err := h.process.Signal(syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrProcessDone) {
+				return fail(codeRun, "kill before delete", err.Error())
+			}
+			<-h.waitDone
 		}
+	} else if status, serr := h.container.Status(); serr == nil && status != libcontainer.Stopped {
+		_ = h.container.Signal(syscall.SIGKILL)
 	}
 	if h.stdin != nil {
 		_ = h.stdin.Close()
@@ -357,6 +387,32 @@ func opDelete(req *opRequest) error {
 }
 
 func opState(req *opRequest) (any, error) {
+	handlesMu.Lock()
+	h := handles[req.ID]
+	handlesMu.Unlock()
+	if h != nil {
+		h.startMu.Lock()
+		if h.waitDone != nil {
+			defer h.startMu.Unlock()
+			// During exec's de_thread, /proc can briefly report the init
+			// leader as a zombie while another thread replaces it. Wait is
+			// authoritative for a child we own; a procfs snapshot is not.
+			select {
+			case <-h.waitDone:
+				if h.waitErr != nil {
+					return nil, h.waitErr
+				}
+				return map[string]any{"status": "stopped", "pid": 0, "exit_code": h.exitCode}, nil
+			default:
+				pid, err := h.process.Pid()
+				if err != nil {
+					return nil, fail(codeInternal, "container pid", err.Error())
+				}
+				return map[string]any{"status": "running", "pid": pid, "exit_code": -1}, nil
+			}
+		}
+		h.startMu.Unlock()
+	}
 	container, err := loadContainer(req, req.ID)
 	if err != nil {
 		// Fall back to the in-memory handle (e.g. state root cleaned up).
@@ -377,11 +433,6 @@ func opState(req *opRequest) (any, error) {
 	if state, err := container.State(); err == nil && state.InitProcessPid > 0 {
 		pid = state.InitProcessPid
 	}
-	handlesMu.Lock()
-	if h, ok := handles[req.ID]; ok && h.done {
-		exit = h.exitCode
-	}
-	handlesMu.Unlock()
 	name := "stopped"
 	switch status {
 	case libcontainer.Running:
