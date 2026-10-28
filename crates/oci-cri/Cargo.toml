@@ -19,6 +19,11 @@ path = "src/main.rs"
 
 [features]
 default = []
+# Run the Linux engine on macOS inside an Apple Virtualization guest embedded
+# in the binary. Every dependency it enables is macOS-only. Opt-in until
+# `cargo xtask guest oci-cri` artifacts (or a release download) are available;
+# then this can become a default feature like oci-runner/oci-builder.
+vm = ["dep:oci-util", "oci-util/vm", "dep:dispatch2", "dep:objc2", "dep:objc2-virtualization"]
 # In-process fake engine used by the integration tests. Not for production.
 test-support = []
 
@@ -35,14 +40,28 @@ tokio-stream = { version = "0.1", features = ["sync", "net"] }
 futures-util = "0.3"
 base64 = "0.23.1"
 sha1 = "0.10"
+oci-util = { path = "../oci-util", version = "0.1.11", default-features = false, optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"
+
+# Product Guest still holds VZ handles; shared boot lives in oci-util.
+[target.'cfg(target_os = "macos")'.dependencies]
+dispatch2 = { version = "0.3", optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-virtualization = { optional = true, version = "0.3.2", default-features = false, features = [
+    "std",
+    "VZVirtualMachine",
+] }
 
 [build-dependencies]
 cc = "1"
 tonic-prost-build = "0.14"
 protoc-bin-vendored = "3"
+
+# Build-dependency cfgs match the build host, which is macOS when embedding the guest.
+[target.'cfg(target_os = "macos")'.build-dependencies]
+oci-util = { path = "../oci-util", version = "0.1.11", default-features = false, features = ["guest-embed"], optional = true }
 
 [dev-dependencies]
 oci-cri = { path = ".", default-features = false, features = ["test-support"] }

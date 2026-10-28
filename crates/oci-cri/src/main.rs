@@ -26,6 +26,21 @@ fn real_main() -> Result<i32, Error> {
     // The libcontainer re-exec child is dispatched before this returns, and
     // its argv must not be parsed as a CLI.
     startup()?;
+    // Guest init invokes `--engine-serve` before clap; keep this ahead of parse.
+    if std::env::args_os().any(|arg| arg == "--engine-serve") {
+        #[cfg(target_os = "linux")]
+        {
+            return oci_cri::serve::engine_serve();
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            return Err(Error::new(
+                oci_cri::ErrorCode::Unsupported,
+                "--engine-serve is only available inside the Linux guest",
+                "",
+            ));
+        }
+    }
     let cli = Cli::parse();
     match cli.command {
         Command::Serve(args) => {

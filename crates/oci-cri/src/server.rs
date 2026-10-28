@@ -15,6 +15,10 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::service::CriService;
 
 /// Serve CRI with the platform engine. Blocks until terminated.
+///
+/// On Linux this runs gRPC in-process. On macOS with the `vm` feature it boots
+/// the embedded Linux guest and proxies the configured unix socket over
+/// virtio-vsock.
 pub fn serve(config: Config) -> Result<()> {
     config.validate()?;
     #[cfg(target_os = "linux")]
@@ -32,7 +36,11 @@ pub fn serve(config: Config) -> Result<()> {
         let _ = crate::linux::shutdown();
         result
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(rok_vm)]
+    {
+        crate::macos::serve(config)
+    }
+    #[cfg(not(any(target_os = "linux", rok_vm)))]
     {
         let _ = config;
         Err(crate::other::unsupported())

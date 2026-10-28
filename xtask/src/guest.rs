@@ -160,6 +160,89 @@ while true; do
 done
 "#;
 
+/// PID 1 for the oci-cri guest. Mounts root/runroot shares (with an ext store
+/// image on the root share, like the builder), brings up NAT, then runs the
+/// CRI vsock agent.
+pub const CRI_INIT: &str = r#"#!/bin/busybox sh
+# PID 1 for the macOS Virtualization.framework CRI guest.
+# Mounts the virtiofs tags the host exported, brings up NAT, then runs the agent.
+
+/bin/busybox --install -s /bin
+
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+mkdir -p /proc /sys /dev /etc /root /mnt /tmp /var/tmp /var/run /run
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /dev/shm
+mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /dev/shm
+
+printf '%s\n' 'root:x:0:0:root:/root:/bin/sh' > /etc/passwd
+printf '%s\n' 'root:x:0:' > /etc/group
+printf '%s\n' 'passwd: files' 'group: files' > /etc/nsswitch.conf
+printf '%s\n' 'hosts: files dns' >> /etc/nsswitch.conf
+
+mkdir -p /sys/fs/cgroup
+mount -t cgroup2 cgroup2 /sys/fs/cgroup || true
+
+# containers/storage cannot live directly on Apple virtiofs (EPERM on chown).
+# Keep the share and mount an ext image from it at /mnt/root.
+mkdir -p /mnt/.host-root /mnt/root /mnt/runroot
+root_mounted=0
+if mount -t virtiofs root /mnt/.host-root 2>/dev/null; then
+    img=/mnt/.host-root/rok-store.img
+    if [ ! -s "$img" ]; then
+        dd if=/dev/zero of="$img" bs=1M seek=8192 count=0
+        mke2fs -F "$img" >/dev/null
+    else
+        echo "oci-cri: existing rok-store.img left unchanged; this guest does not grow it. Recreation: shut the VM down, copy the image aside, delete rok-store.img, and let the next boot create a new sparse 8GiB image." >&2
+    fi
+    if mount -t ext4 "$img" /mnt/root 2>/dev/null || mount -t ext2 "$img" /mnt/root; then
+        root_mounted=1
+    fi
+elif mount -t tmpfs tmpfs /mnt/root; then
+    root_mounted=1
+fi
+if [ "$root_mounted" != 1 ]; then
+    echo "oci-cri: failed to mount /mnt/root" >&2
+    exit 1
+fi
+mkdir -p /mnt/root/tmp
+chmod 1777 /mnt/root/tmp
+export TMPDIR=/mnt/root/tmp
+export TMP=/mnt/root/tmp
+export TEMP=/mnt/root/tmp
+
+# State root is ephemeral; prefer the host runroot share when present.
+if ! mount -t virtiofs runroot /mnt/runroot 2>/dev/null; then
+    mount -t tmpfs tmpfs /mnt/runroot
+fi
+mkdir -p /run/oci-cri
+
+ip link set lo up 2>/dev/null || true
+for iface in /sys/class/net/*; do
+    name=${iface##*/}
+    case "$name" in
+        lo) continue ;;
+    esac
+    if [ ! -e "$iface/device" ]; then
+        continue
+    fi
+    ip link set "$name" up 2>/dev/null || true
+    udhcpc -i "$name" -q -n -t 5 -T 1 -s /udhcpc.script || true
+done
+
+# Stay PID 1 after the agent exits. Exiting here panics the kernel
+# ("Attempted to kill init") while the host is still reading the console.
+/oci-cri --engine-serve
+sync
+umount /mnt/root 2>/dev/null || true
+while true; do
+    sleep 3600
+done
+"#;
+
 /// The udhcpc hook both guests use to apply a DHCP lease. Installed as
 /// /udhcpc.script, the path the init scripts pass to `udhcpc -s`.
 pub const UDHCPC_SCRIPT: &str = r#"#!/bin/busybox sh

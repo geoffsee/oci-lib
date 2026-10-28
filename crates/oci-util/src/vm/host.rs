@@ -33,8 +33,19 @@ use crate::vm::config::GuestConfig;
 use crate::vm::error::{VmError, VmErrorKind};
 use crate::vm::shares::Export;
 
-/// A booted guest with an open vsock pair. Product crates run their own
-/// protocol handshake on [`StartedVm::read`] / the write half.
+/// A booted guest without an open vsock. Use [`connect_guest_vsock`] for each
+/// connection (CRI proxies many unix sockets onto many vsock dials).
+pub struct BootedVm {
+    /// Virtual machine object (not `Send`; all calls go through `queue`).
+    pub vm: Retained<VZVirtualMachine>,
+    /// Serial dispatch queue owning the VM.
+    pub queue: DispatchRetained<DispatchQueue>,
+    /// Console drain thread (kept alive for the guest lifetime).
+    pub console: JoinHandle<()>,
+}
+
+/// A booted guest with one open vsock pair. Framed products (builder/runner)
+/// run their protocol handshake on [`StartedVm::read`] / the write half.
 pub struct StartedVm {
     /// Virtual machine object (not `Send`; all calls go through `queue`).
     pub vm: Retained<VZVirtualMachine>,
@@ -53,15 +64,16 @@ pub fn virtualization_supported() -> bool {
     unsafe { VZVirtualMachine::isSupported() }
 }
 
-/// Boot the guest, connect vsock, and return read/write file halves.
+/// Boot the guest without connecting vsock.
 ///
-/// Does not perform the product protocol hello; callers do that next.
-pub fn start_vm(
+/// Use this when the product opens many vsock connections (CRI byte proxy).
+/// Framed single-channel products should call [`start_vm`] instead.
+pub fn boot_vm(
     guest: &GuestConfig,
     kernel: &Path,
     initrd: &Path,
     exports: &[Export],
-) -> Result<StartedVm, VmError> {
+) -> Result<BootedVm, VmError> {
     let queue = DispatchQueue::new(guest.queue_label, DispatchQueueAttr::SERIAL);
     let (console_read, config) = vm_config(guest, kernel, initrd, exports)?;
     let console = spawn_console(console_read, guest.console_thread_name);
@@ -99,7 +111,18 @@ pub fn start_vm(
             }));
         }
     })?;
-    let fd = connect_vsock(vm_ptr, &queue, guest.vsock_port, guest.boot_timeout)?;
+    Ok(BootedVm { vm, queue, console })
+}
+
+/// Connect a new host vsock to the guest agent port and return read/write halves.
+pub fn connect_guest_vsock(
+    vm: &Retained<VZVirtualMachine>,
+    queue: &DispatchQueue,
+    port: u32,
+    timeout: Duration,
+) -> Result<(File, File), VmError> {
+    let vm_ptr = Retained::as_ptr(vm) as usize;
+    let fd = connect_vsock(vm_ptr, queue, port, timeout)?;
     prepare_fd(fd);
     let write_fd = unsafe { libc::dup(fd) };
     if write_fd < 0 {
@@ -109,13 +132,39 @@ pub fn start_vm(
     prepare_fd(write_fd);
     let read = unsafe { File::from(OwnedFd::from_raw_fd(fd)) };
     let write = unsafe { File::from(OwnedFd::from_raw_fd(write_fd)) };
+    Ok((read, write))
+}
+
+/// Boot the guest, connect one vsock, and return read/write file halves.
+///
+/// Does not perform the product protocol hello; callers do that next.
+pub fn start_vm(
+    guest: &GuestConfig,
+    kernel: &Path,
+    initrd: &Path,
+    exports: &[Export],
+) -> Result<StartedVm, VmError> {
+    let booted = boot_vm(guest, kernel, initrd, exports)?;
+    let (read, write) = connect_guest_vsock(
+        &booted.vm,
+        &booted.queue,
+        guest.vsock_port,
+        guest.boot_timeout,
+    )?;
     Ok(StartedVm {
-        vm,
-        queue,
-        console,
+        vm: booted.vm,
+        queue: booted.queue,
+        console: booted.console,
         read,
         write,
     })
+}
+
+impl BootedVm {
+    /// Stop the guest virtual machine.
+    pub fn stop(self) {
+        stop_virtual_machine(self.vm, &self.queue);
+    }
 }
 
 impl StartedVm {

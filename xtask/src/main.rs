@@ -2,10 +2,11 @@
 
 //! Repository tasks, run with `cargo xtask <task>`.
 //!
-//! `cargo xtask guest [oci-builder|oci-runner]...` builds the Linux guest the
-//! macOS host boots and writes `crates/<package>/guest/out/{vmlinuz,initramfs,attestation.json}`.
+//! `cargo xtask guest [oci-builder|oci-runner|oci-cri]...` builds the Linux
+//! guest the macOS host boots and writes
+//! `crates/<package>/guest/out/{vmlinuz,initramfs,attestation.json}`.
 //! Run it on Linux, on the same architecture as the Mac (arm64 for Apple
-//! Silicon). With no package it builds both.
+//! Silicon). With no package it builds all product guests.
 
 use std::collections::BTreeMap;
 use std::env;
@@ -23,7 +24,7 @@ mod guest;
 #[path = "../../crates/oci-builder/src/protocol_version.rs"]
 mod protocol_version;
 
-const PACKAGES: [&str; 2] = ["oci-builder", "oci-runner"];
+const PACKAGES: [&str; 3] = ["oci-builder", "oci-runner", "oci-cri"];
 const KERNEL_RELEASE: &str = "https://github.com/arcboxlabs/kernel/releases/download/v0.0.25";
 const BUSYBOX: &str = "busybox-1.36.1";
 const BUSYBOX_SHA: &str = "b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314";
@@ -34,7 +35,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("guest") => guest(&args[1..]),
-        _ => Err("usage: cargo xtask guest [oci-builder|oci-runner]...".into()),
+        _ => Err("usage: cargo xtask guest [oci-builder|oci-runner|oci-cri]...".into()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -89,6 +90,7 @@ fn guest(packages: &[String]) -> Result<()> {
         archive.file("bin/busybox", 0o755, read(&busybox)?);
         let init = match package {
             "oci-builder" => guest::BUILDER_INIT,
+            "oci-cri" => guest::CRI_INIT,
             _ => guest::RUNNER_INIT,
         };
         archive.file("init", 0o755, init.as_bytes().to_vec());
@@ -265,11 +267,16 @@ fn build_package(root: &Path, target_dir: &Path, package: &str) -> Result<PathBu
     let mut cmd = Command::new(cargo);
     cmd.args(["build", "--release", "--locked", "-p", package])
         .current_dir(root);
-    if package == "oci-builder" {
-        eprintln!("building oci-builder without seccomp or apparmor");
-        cmd.env("ROB_DISABLE_OPTIONAL_LIBS", "1");
-    } else {
-        eprintln!("building {package}");
+    match package {
+        "oci-builder" => {
+            eprintln!("building oci-builder without seccomp or apparmor");
+            cmd.env("ROB_DISABLE_OPTIONAL_LIBS", "1");
+        }
+        "oci-cri" => {
+            eprintln!("building oci-cri without seccomp");
+            cmd.env("ROK_DISABLE_OPTIONAL_LIBS", "1");
+        }
+        _ => eprintln!("building {package}"),
     }
     run(&mut cmd)?;
     Ok(target_dir.join("release").join(package))

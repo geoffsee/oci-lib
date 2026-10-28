@@ -17,15 +17,14 @@ A Rust monorepo for daemonless OCI image building and container execution.
 |---|---|---|---|---|---|
 | [`oci-builder`](crates/oci-builder) | `oci-builder` | [Buildah](https://github.com/containers/buildah) | Build & push OCI container images | In-process Go c-archive (`startup()`) | Apple Virtualization Linux guest (vsock) |
 | [`oci-runner`](crates/oci-runner) | `oci-runner` | [libcontainer](https://github.com/opencontainers/runc/tree/main/libcontainer) | Execute foreground containers from a rootfs | In-process Go c-archive (`startup()`) | Apple Virtualization Linux guest (vsock) |
-| [`oci-cri`](crates/oci-cri) | `oci-cri` | libcontainer + containers/image & storage | Vendor-agnostic CRI v1 runtime for any kubelet | In-process Go c-archive (`startup()`) | Stub (engine is Linux-only) |
+| [`oci-cri`](crates/oci-cri) | `oci-cri` | libcontainer + containers/image & storage | Vendor-agnostic CRI v1 runtime for any kubelet | In-process Go c-archive (`startup()`) | Stub; `--features vm` → Virtualization guest (vsock proxy) |
 
 [`oci-util`](crates/oci-util) provides the shared utility library: Notary Project
 signature helpers and (behind the `vm` / `guest-embed` features) the macOS
-guest packaging shared by builder and runner — entitlement self-sign,
+guest packaging shared by builder, runner, and cri — entitlement self-sign,
 attestation check, virtiofs shares, and Virtualization boot/vsock. Product
-crates keep separate Go engines. `oci-cri` is Linux-engine + stub on macOS
-today; a future CRI guest should consume `oci_util::vm` rather than copy it.
-`oci-util` is an internal workspace crate and is not published on its own.
+crates keep separate Go engines. `oci-util` is an internal workspace crate
+and is not published on its own.
 
 The builder and runner share a unified architectural pattern:
 - **Zero Daemons**: Everything executes synchronously in-process.

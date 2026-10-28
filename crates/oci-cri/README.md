@@ -79,8 +79,15 @@ Supply CNI plugins and a pause image on disk before the first pod.
 
 ## macOS
 
-Non-Linux hosts link the engine stub (`ErrorCode::Unsupported`). A future
-macOS guest path should reuse [`oci_util::vm`](../oci-util) (entitlement,
-virtiofs shares, Virtualization boot/vsock) the same way `oci-runner` and
-`oci-builder` do — not reimplement Apple Virtualization. The CRI/Go engine
-stays separate from those products' shims.
+Without `vm`, macOS links the engine stub (`ErrorCode::Unsupported`).
+
+With `--features vm`, macOS boots an embedded Linux guest via
+[`oci_util::vm`](../oci-util) and proxies each host CRI unix connection over
+virtio-vsock (port 5254, banner `ROKCRI1`) to `oci-cri --engine-serve` inside
+the guest. Build the guest on Linux with `cargo xtask guest oci-cri` (or let
+the release download cache supply images once published). Until those artifacts
+exist, keep `vm` opt-in so plain workspace builds stay green.
+
+MVP limits: CNI is disabled in the guest (sandboxes share the guest netns);
+Exec/Attach streaming URLs are not rewritten to the host, so kubelet streaming
+against a Mac-hosted socket is not supported yet.
