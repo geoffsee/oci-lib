@@ -3,6 +3,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 [![oci-builder on crates.io](https://img.shields.io/crates/v/oci-builder.svg?label=oci-builder)](https://crates.io/crates/oci-builder)
 [![oci-runner on crates.io](https://img.shields.io/crates/v/oci-runner.svg?label=oci-runner)](https://crates.io/crates/oci-runner)
+[![oci-cri on crates.io](https://img.shields.io/crates/v/oci-cri.svg?label=oci-cri)](https://crates.io/crates/oci-cri)
 
 A Rust monorepo for daemonless OCI image building and container execution.
 
@@ -16,6 +17,7 @@ A Rust monorepo for daemonless OCI image building and container execution.
 |---|---|---|---|---|---|
 | [`oci-builder`](crates/oci-builder) | `oci-builder` | [Buildah](https://github.com/containers/buildah) | Build & push OCI container images | In-process Go c-archive (`startup()`) | Apple Virtualization Linux guest (vsock) |
 | [`oci-runner`](crates/oci-runner) | `oci-runner` | [libcontainer](https://github.com/opencontainers/runc/tree/main/libcontainer) | Execute foreground containers from a rootfs | In-process Go c-archive (`startup()`) | Apple Virtualization Linux guest (vsock) |
+| [`oci-cri`](crates/oci-cri) | `oci-cri` | libcontainer + containers/image & storage | Vendor-agnostic CRI v1 runtime for any kubelet | In-process Go c-archive (`startup()`) | Stub (engine is Linux-only) |
 
 [`oci-util`](crates/oci-util) provides the shared utility library: Notary Project
 signature helpers and (behind the `vm` / `guest-embed` features) the macOS
@@ -43,6 +45,9 @@ oci-builder = "0.1"
 
 # For container execution:
 oci-runner = "0.1"
+
+# For a CRI runtime (any kubelet):
+oci-cri = "0.1"
 ```
 
 On macOS, the default `vm` feature runs the engine in an Apple Virtualization Linux guest embedded in the binary. Its dependencies are macOS-only, so other platforms compile nothing extra. With `default-features = false`, macOS builds link the stub and return `ErrorCode::Unsupported`; add `features = ["vm"]` to keep the guest. `oci-builder`'s default features also include `default-policy`, which supplies the containers-common signature policy when none is configured. `--no-default-features` turns that off along with `vm`.
@@ -52,6 +57,7 @@ On macOS, the default `vm` feature runs the engine in an Apple Virtualization Li
 ```bash
 cargo install oci-builder
 cargo install oci-runner
+cargo install oci-cri
 ```
 
 A macOS build embeds the guest from `crates/<crate>/guest/out/` when present. Otherwise it downloads the release's kernel and initramfs into `~/Library/Caches/<crate>/downloads` (override with `ROB_GUEST_CACHE` / `ROR_GUEST_CACHE`), verifies their checksums, and embeds them.
