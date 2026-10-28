@@ -37,6 +37,14 @@ pub fn sandbox_spec(
     image: Option<&ImageSpec>,
     hostname: &str,
 ) -> Result<String> {
+    if let Some(security) = config
+        .linux
+        .as_ref()
+        .and_then(|linux| linux.security_context.as_ref())
+    {
+        #[allow(deprecated)]
+        validate_seccomp(security.seccomp.as_ref(), &security.seccomp_profile_path)?;
+    }
     let host_network = config
         .linux
         .as_ref()
@@ -90,6 +98,10 @@ pub fn container_spec(
     }
     let linux = config.linux.as_ref();
     let security = linux.and_then(|l| l.security_context.as_ref());
+    if let Some(security) = security {
+        #[allow(deprecated)]
+        validate_seccomp(security.seccomp.as_ref(), &security.seccomp_profile_path)?;
+    }
     let args = image_args(image, &config.command, &config.args);
     if args.is_empty() {
         return Err(Error::new(
@@ -281,14 +293,23 @@ fn bind_mount(mount: &crate::api::Mount) -> Value {
             Ok(crate::api::MountPropagation::PropagationBidirectional) => "rshared".to_string(),
         },
     );
-    json!({
+    let mut value = json!({
         "destination": mount.container_path,
         "source": mount.host_path,
         "type": "bind",
         "options": options,
-        "uidMappings": mount.uid_mappings.iter().map(|m| json!({"containerID": m.container_id, "hostID": m.host_id, "size": m.length})).collect::<Vec<_>>(),
-        "gidMappings": mount.gid_mappings.iter().map(|m| json!({"containerID": m.container_id, "hostID": m.host_id, "size": m.length})).collect::<Vec<_>>(),
-    })
+    });
+    // Empty arrays are not equivalent to absent mappings in libcontainer:
+    // they request an id-mapped mount without any valid ID ranges.
+    for (key, mappings) in [
+        ("uidMappings", &mount.uid_mappings),
+        ("gidMappings", &mount.gid_mappings),
+    ] {
+        if !mappings.is_empty() {
+            value[key] = json!(mappings.iter().map(|m| json!({"containerID": m.container_id, "hostID": m.host_id, "size": m.length})).collect::<Vec<_>>());
+        }
+    }
+    value
 }
 
 fn default_mounts() -> Vec<Value> {
@@ -679,5 +700,94 @@ mod tests {
             .find(|m| m["destination"] == "/var/data")
             .unwrap();
         assert_eq!(volume["type"], json!("tmpfs"));
+    }
+}
+
+#[cfg(test)]
+mod mount_mapping_regressions {
+    use super::*;
+    use crate::api::{IdMapping, Mount};
+
+    #[test]
+    fn ordinary_bind_mounts_do_not_request_id_mapping() {
+        let value = bind_mount(&Mount {
+            host_path: "/host/token".into(),
+            container_path: "/var/run/secrets/token".into(),
+            readonly: true,
+            ..Default::default()
+        });
+        assert!(value.get("uidMappings").is_none());
+        assert!(value.get("gidMappings").is_none());
+        assert_eq!(value["options"], json!(["bind", "ro", "rprivate"]));
+    }
+
+    #[test]
+    fn explicit_mount_mappings_are_preserved() {
+        let mapping = IdMapping {
+            container_id: 0,
+            host_id: 100000,
+            length: 65536,
+        };
+        let value = bind_mount(&Mount {
+            uid_mappings: vec![mapping],
+            gid_mappings: vec![mapping],
+            ..Default::default()
+        });
+        assert_eq!(
+            value["uidMappings"],
+            json!([{"containerID":0,"hostID":100000,"size":65536}])
+        );
+        assert_eq!(value["gidMappings"], value["uidMappings"]);
+    }
+}
+
+// Until profile translation is implemented, never silently run a requested
+// confined workload without its filter. The modern field takes precedence.
+fn validate_seccomp(profile: Option<&crate::api::SecurityProfile>, legacy: &str) -> Result<()> {
+    let unconfined = profile.map_or(legacy.is_empty() || legacy == "unconfined", |profile| {
+        profile.profile_type == crate::api::security_profile::ProfileType::Unconfined as i32
+    });
+    if unconfined {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::Unsupported,
+        "seccomp profile enforcement is not implemented",
+        "requested profile was not applied; refusing to create an unconfined container",
+    ))
+}
+
+#[cfg(test)]
+mod seccomp_regressions {
+    use super::*;
+    use crate::api::{SecurityProfile, security_profile::ProfileType};
+
+    #[test]
+    fn requested_seccomp_is_rejected_instead_of_silently_ignored() {
+        for kind in [ProfileType::RuntimeDefault, ProfileType::Localhost] {
+            assert!(
+                validate_seccomp(
+                    Some(&SecurityProfile {
+                        profile_type: kind as i32,
+                        ..Default::default()
+                    }),
+                    ""
+                )
+                .is_err()
+            );
+        }
+        assert!(validate_seccomp(None, "runtime/default").is_err());
+        assert!(validate_seccomp(None, "localhost/profile.json").is_err());
+        assert!(validate_seccomp(None, "").is_ok());
+        assert!(
+            validate_seccomp(
+                Some(&SecurityProfile {
+                    profile_type: ProfileType::Unconfined as i32,
+                    ..Default::default()
+                }),
+                "runtime/default"
+            )
+            .is_ok()
+        );
     }
 }

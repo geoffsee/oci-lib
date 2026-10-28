@@ -193,6 +193,10 @@ fn invoke(
         // Each plugin gets the previous result chained as prevResult.
         let mut input = plugin.clone();
         input["name"] = Value::String(name.clone());
+        input["cniVersion"] = conf
+            .get("cniVersion")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!("1.0.0"));
         if !result.is_empty() {
             if let Ok(prev) = serde_json::from_slice::<Value>(&result) {
                 input["prevResult"] = prev;
@@ -316,7 +320,7 @@ mod tests {
         let plugin = bin_dir.join("fakebridge");
         std::fs::write(
             &plugin,
-            "#!/bin/sh\ncat >/dev/null\necho '{\"cniVersion\":\"1.0.0\",\"ips\":[{\"address\":\"10.1.0.3/24\"}]}'\n",
+            "#!/bin/sh\ngrep -q '\"cniVersion\":\"1.0.0\"' || exit 1\necho '{\"cniVersion\":\"1.0.0\",\"ips\":[{\"address\":\"10.1.0.3/24\"}]}'\n",
         )
         .unwrap();
         std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o755)).unwrap();
