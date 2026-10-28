@@ -5,17 +5,17 @@
 //! `build.rs` compiles this file on its own, before the library exists, so it
 //! stays limited to `std`. Diagnose formatting lives in `guest_record.rs`.
 
-pub(crate) struct Attestation {
-    pub(crate) package: String,
-    pub(crate) package_version: String,
-    pub(crate) protocol_version: u32,
-    pub(crate) kernel_sha256: String,
-    pub(crate) initramfs_sha256: String,
+pub struct Attestation {
+    pub package: String,
+    pub package_version: String,
+    pub protocol_version: u32,
+    pub kernel_sha256: String,
+    pub initramfs_sha256: String,
     /// Initramfs paths in the order the attestation lists them.
-    pub(crate) members: Vec<String>,
+    pub members: Vec<String>,
 }
 
-pub(crate) fn parse(json: &str) -> Result<Attestation, String> {
+pub fn parse(json: &str) -> Result<Attestation, String> {
     let package = string_field(json, "package")?;
     let package_version = string_field(json, "package_version")?;
     let protocol_version = number_field(json, "protocol_version")?;
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn members_keep_attested_order_and_unescaped_paths() {
         let json = r#"{
-            "package": "oci-builder",
+            "package": "oci-runner",
             "package_version": "0.1.9",
             "protocol_version": 2,
             "kernel_sha256": "abc",
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn unicode_escapes_in_paths_decode() {
-        let json = r#"{"package":"oci-builder","package_version":"0.1.9","protocol_version":2,"kernel_sha256":"k","initramfs_sha256":"i","members":[{"path":"a\u002fb"}]}"#;
+        let json = r#"{"package":"oci-runner","package_version":"0.1.9","protocol_version":2,"kernel_sha256":"k","initramfs_sha256":"i","members":[{"path":"a\u002fb"}]}"#;
         let attestation = parse(json).unwrap();
         assert_eq!(attestation.members, ["a/b"]);
     }

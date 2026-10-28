@@ -17,9 +17,12 @@ A Rust monorepo for daemonless OCI image building and container execution.
 | [`oci-builder`](crates/oci-builder) | `oci-builder` | [Buildah](https://github.com/containers/buildah) | Build & push OCI container images | In-process Go c-archive (`startup()`) | Apple Virtualization Linux guest (vsock) |
 | [`oci-runner`](crates/oci-runner) | `oci-runner` | [libcontainer](https://github.com/opencontainers/runc/tree/main/libcontainer) | Execute foreground containers from a rootfs | In-process Go c-archive (`startup()`) | Apple Virtualization Linux guest (vsock) |
 
-[`oci-util`](crates/oci-util) provides the shared utility library, including the
-module structure for Notary Project signature helpers. It is an internal
-workspace implementation and is not published as a standalone crate.
+[`oci-util`](crates/oci-util) provides the shared utility library: Notary Project
+signature helpers and (behind the `vm` / `guest-embed` features) the macOS
+guest packaging shared by builder and runner — entitlement self-sign,
+attestation check, virtiofs shares, and Virtualization boot/vsock. Product
+crates keep separate Go engines. `oci-util` is an internal workspace crate
+and is not published on its own.
 
 The builder and runner share a unified architectural pattern:
 - **Zero Daemons**: Everything executes synchronously in-process.

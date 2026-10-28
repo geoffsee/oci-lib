@@ -630,7 +630,7 @@ impl Builder {
 pub fn startup() -> Result<()> {
     #[cfg(rob_vm)]
     {
-        crate::entitlement::ensure();
+        oci_util::vm::ensure_entitlement(crate::guest_config::GUEST.no_self_sign_env);
         Ok(())
     }
     #[cfg(not(rob_vm))]

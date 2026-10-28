@@ -14,6 +14,21 @@ publish = false
 name = "oci_util"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Std-only guest attestation parse/check and build-script embed helpers.
+guest-embed = ["dep:flate2", "dep:zstd"]
+# macOS Virtualization host glue. Optional objc deps live under the macOS
+# target table, so Linux builds that enable this feature compile nothing extra.
+vm = [
+    "dep:block2",
+    "dep:dispatch2",
+    "dep:objc2",
+    "dep:objc2-foundation",
+    "dep:objc2-virtualization",
+    "dep:zstd",
+]
+
 [dependencies]
 base64 = "0.23.1"
 ciborium = "0.2.2"
@@ -25,6 +40,53 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = { version = "0.10", features = ["oid"] }
 x509-parser = "0.18.1"
+flate2 = { version = "1", optional = true }
+zstd = { version = "0.14", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+block2 = { version = "0.6", optional = true }
+dispatch2 = { version = "0.3", optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-foundation = { optional = true, version = "0.3", features = [
+    "NSArray",
+    "NSError",
+    "NSFileHandle",
+    "NSString",
+    "NSURL",
+] }
+objc2-virtualization = { optional = true, version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "dispatch2",
+    "VZBootLoader",
+    "VZLinuxBootLoader",
+    "VZVirtualMachine",
+    "VZVirtualMachineConfiguration",
+    "VZGenericPlatformConfiguration",
+    "VZGenericMachineIdentifier",
+    "VZPlatformConfiguration",
+    "VZVirtioFileSystemDeviceConfiguration",
+    "VZDirectoryShare",
+    "VZDirectorySharingDeviceConfiguration",
+    "VZSharedDirectory",
+    "VZSingleDirectoryShare",
+    "VZVirtioSocketDevice",
+    "VZVirtioSocketDeviceConfiguration",
+    "VZVirtioSocketConnection",
+    "VZSocketDevice",
+    "VZSocketDeviceConfiguration",
+    "VZNATNetworkDeviceAttachment",
+    "VZNetworkDeviceAttachment",
+    "VZNetworkDeviceConfiguration",
+    "VZVirtioNetworkDeviceConfiguration",
+    "VZVirtioEntropyDeviceConfiguration",
+    "VZEntropyDeviceConfiguration",
+    "VZSerialPortConfiguration",
+    "VZSerialPortAttachment",
+    "VZFileHandleSerialPortAttachment",
+    "VZVirtioConsoleDeviceSerialPortConfiguration",
+] }
 
 [dev-dependencies]
 rcgen = "0.13"

@@ -1,7 +1,12 @@
 //! Shared helpers for OCI tooling.
 //!
-//! This library is independent of the builder and runner engines.
+//! Signature helpers are always available. Guest attestation (`guest-embed`)
+//! and macOS Virtualization host glue (`vm`) are feature-gated so product
+//! crates can share them without merging their engines.
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(all(feature = "vm", target_os = "macos")), forbid(unsafe_code))]
 
 pub mod signature;
+
+#[cfg(any(feature = "guest-embed", feature = "vm"))]
+pub mod vm;

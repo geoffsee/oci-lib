@@ -32,12 +32,10 @@
 pub mod proto;
 pub use proto as ror_proto;
 
-#[cfg(ror_vm)]
-mod entitlement;
 mod error;
 mod ffi;
-#[cfg(any(ror_vm, test))]
-mod guest_record;
+#[cfg(ror_vm)]
+mod guest_config;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(ror_vm)]
@@ -46,8 +44,6 @@ mod macos;
 mod other;
 mod protocol_version;
 mod request;
-#[cfg(any(ror_vm, test))]
-mod shares;
 
 #[cfg(target_os = "linux")]
 unsafe extern "C" {
@@ -72,7 +68,7 @@ pub type OutputFn = Arc<dyn Fn(u8, &[u8]) + Send + Sync>;
 /// function: Go `init` calls `libcontainer.Init` and does not return. On
 /// macOS this does not boot a guest, so `--help` stays local. If the binary
 /// lacks the `com.apple.security.virtualization` entitlement, it signs itself
-/// ad hoc and re-executes with the same arguments (`ROR_NO_SELF_SIGN=1`
+/// ad hoc and re-executes it with the same arguments (`ROR_NO_SELF_SIGN=1`
 /// turns that off).
 pub fn startup() -> Result<(), Error> {
     #[cfg(target_os = "linux")]
@@ -81,7 +77,7 @@ pub fn startup() -> Result<(), Error> {
     }
     #[cfg(ror_vm)]
     {
-        entitlement::ensure();
+        oci_util::vm::ensure_entitlement(guest_config::GUEST.no_self_sign_env);
         Ok(())
     }
     #[cfg(not(any(target_os = "linux", ror_vm)))]

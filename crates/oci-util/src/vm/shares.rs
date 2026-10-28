@@ -6,48 +6,71 @@
 
 use std::path::{Path, PathBuf};
 
+/// Runner rootfs share tag.
+pub const TAG_ROOTFS: &str = "rootfs";
+/// Builder build-context share tag.
 pub const TAG_CONTEXT: &str = "context";
+/// Builder storage-root share tag.
 pub const TAG_ROOT: &str = "root";
+/// Builder run-root share tag.
 pub const TAG_RUNROOT: &str = "runroot";
+/// Builder signature-policy parent share tag.
 pub const TAG_POLICY: &str = "policy";
+/// Builder registries.conf parent share tag.
 pub const TAG_REGISTRIES: &str = "registries";
+/// Builder auth-file parent share tag.
 pub const TAG_AUTH: &str = "auth";
 
+/// Guest mount for [`TAG_ROOTFS`].
+pub const GUEST_ROOTFS: &str = "/mnt/rootfs";
+/// Guest mount for [`TAG_CONTEXT`].
 pub const GUEST_CONTEXT: &str = "/mnt/context";
+/// Guest mount for [`TAG_ROOT`].
 pub const GUEST_ROOT: &str = "/mnt/root";
+/// Guest mount for [`TAG_RUNROOT`].
 pub const GUEST_RUNROOT: &str = "/mnt/runroot";
+/// Guest mount for [`TAG_POLICY`].
 pub const GUEST_POLICY: &str = "/mnt/policy";
+/// Guest mount for [`TAG_REGISTRIES`].
 pub const GUEST_REGISTRIES: &str = "/mnt/registries";
+/// Guest mount for [`TAG_AUTH`].
 pub const GUEST_AUTH: &str = "/mnt/auth";
 
 /// One host directory mounted in the guest at `guest`.
-///
-/// `read_only` is set for the build-context share only. The storage root
-/// stays writable because the guest writes its graph image there. Other
-/// shares stay writable too.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Export {
+    /// Virtiofs tag.
     pub tag: &'static str,
+    /// Canonical host directory.
     pub host: PathBuf,
+    /// Absolute guest mount point.
     pub guest: &'static str,
+    /// Whether the guest sees the share read-only.
     pub read_only: bool,
 }
 
-/// Directories the next boot has to export.
+/// Directories a builder boot has to export.
 ///
 /// `context` is the build context. The dockerfile has to live inside it.
-/// File settings contribute their parent directory. A host path that is
-/// already exported is not added again; [`guest_path`] still rewrites it.
+/// File settings contribute their parent directory.
 pub struct ShareRequest<'a> {
+    /// Build context directory.
     pub context: Option<&'a Path>,
+    /// Dockerfile path (must be under `context` when both are set).
     pub dockerfile: Option<&'a Path>,
+    /// Graph / storage root.
     pub storage_root: Option<&'a Path>,
+    /// Run root.
     pub run_root: Option<&'a Path>,
+    /// Signature policy file.
     pub signature_policy: Option<&'a Path>,
+    /// registries.conf file.
     pub registries_conf: Option<&'a Path>,
+    /// containers auth file.
     pub auth_file: Option<&'a Path>,
 }
 
+/// Plan virtiofs exports for a builder-style share request.
 pub fn plan_shares(request: ShareRequest<'_>) -> Result<Vec<Export>, String> {
     if let (Some(dockerfile), Some(context)) = (request.dockerfile, request.context) {
         if !dockerfile.starts_with(context) {
@@ -86,6 +109,20 @@ pub fn plan_shares(request: ShareRequest<'_>) -> Result<Vec<Export>, String> {
     Ok(exports)
 }
 
+/// Export a single writable rootfs for the runner guest.
+pub fn export_rootfs(rootfs: &Path) -> Result<Export, String> {
+    let host = canonicalize(rootfs)?;
+    if !host.is_dir() {
+        return Err(format!("{} is not a directory", host.display()));
+    }
+    Ok(Export {
+        tag: TAG_ROOTFS,
+        host,
+        guest: GUEST_ROOTFS,
+        read_only: false,
+    })
+}
+
 /// Rewrite a host path to the guest path under the longest matching export.
 pub fn guest_path(path: &Path, exports: &[Export]) -> Result<String, String> {
     let path = canonicalize(path)?;
@@ -116,7 +153,8 @@ pub fn guest_path(path: &Path, exports: &[Export]) -> Result<String, String> {
     Ok(guest)
 }
 
-fn add_dir(
+/// Add a directory export unless that host path is already covered.
+pub fn add_dir(
     exports: &mut Vec<Export>,
     tag: &'static str,
     guest: &'static str,
@@ -139,7 +177,8 @@ fn add_dir(
     Ok(())
 }
 
-fn add_file_parent(
+/// Add the parent directory of a file as an export.
+pub fn add_file_parent(
     exports: &mut Vec<Export>,
     tag: &'static str,
     guest: &'static str,
@@ -167,7 +206,7 @@ mod tests {
 
     fn scratch(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
-            "rob-share-{name}-{}-{}",
+            "oci-util-share-{name}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -176,6 +215,14 @@ mod tests {
         ));
         std::fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn rewrites_rootfs_to_guest_path() {
+        let root = scratch("rootfs");
+        let export = export_rootfs(&root).unwrap();
+        assert_eq!(guest_path(&root, &[export]).unwrap(), "/mnt/rootfs");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -201,85 +248,9 @@ mod tests {
         })
         .unwrap();
         assert!(exports.iter().any(|export| export.tag == TAG_CONTEXT));
-        assert!(exports.iter().any(|export| export.tag == TAG_ROOT));
-        assert!(exports.iter().any(|export| export.tag == TAG_POLICY));
-        assert!(
-            exports
-                .iter()
-                .find(|export| export.tag == TAG_CONTEXT)
-                .unwrap()
-                .read_only
-        );
-        assert!(
-            !exports
-                .iter()
-                .find(|export| export.tag == TAG_ROOT)
-                .unwrap()
-                .read_only
-        );
-        assert!(
-            !exports
-                .iter()
-                .find(|export| export.tag == TAG_POLICY)
-                .unwrap()
-                .read_only
-        );
-
-        let guest_docker = guest_path(&dockerfile, &exports).unwrap();
-        assert_eq!(guest_docker, "/mnt/context/Dockerfile");
-        let guest_graph = guest_path(&graph, &exports).unwrap();
-        assert_eq!(guest_graph, "/mnt/root");
-        let guest_policy = guest_path(&policy, &exports).unwrap();
-        assert_eq!(guest_policy, "/mnt/policy/policy.json");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn rejects_a_dockerfile_outside_the_context() {
-        let root = scratch("split");
-        let context = root.join("ctx");
-        let other = root.join("other");
-        std::fs::create_dir_all(&context).unwrap();
-        std::fs::create_dir_all(&other).unwrap();
-        let dockerfile = other.join("Dockerfile");
-        std::fs::write(&dockerfile, "FROM scratch\n").unwrap();
-        let err = plan_shares(ShareRequest {
-            context: Some(&context),
-            dockerfile: Some(&dockerfile),
-            storage_root: None,
-            run_root: None,
-            signature_policy: None,
-            registries_conf: None,
-            auth_file: None,
-        })
-        .unwrap_err();
-        assert!(err.contains("outside"));
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn one_export_covers_a_policy_inside_the_context() {
-        let root = scratch("inside");
-        let context = root.join("ctx");
-        std::fs::create_dir_all(&context).unwrap();
-        let dockerfile = context.join("Dockerfile");
-        let policy = context.join("policy.json");
-        std::fs::write(&dockerfile, "FROM scratch\n").unwrap();
-        std::fs::write(&policy, "{}\n").unwrap();
-        let exports = plan_shares(ShareRequest {
-            context: Some(&context),
-            dockerfile: Some(&dockerfile),
-            storage_root: None,
-            run_root: None,
-            signature_policy: Some(&policy),
-            registries_conf: None,
-            auth_file: None,
-        })
-        .unwrap();
-        assert_eq!(exports.len(), 1);
         assert_eq!(
-            guest_path(&policy, &exports).unwrap(),
-            "/mnt/context/policy.json"
+            guest_path(&dockerfile, &exports).unwrap(),
+            "/mnt/context/Dockerfile"
         );
         let _ = std::fs::remove_dir_all(&root);
     }

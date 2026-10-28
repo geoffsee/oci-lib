@@ -819,36 +819,29 @@ name = "oci-builder"
 version = "0.1.11"
 dependencies = [
  "base64 0.23.1",
- "block2",
  "cc",
  "clap",
  "dispatch2",
- "flate2",
  "libc",
  "objc2",
- "objc2-foundation",
  "objc2-virtualization",
  "oci-util",
  "serde",
  "serde_json",
  "ureq",
- "zstd",
 ]
 
 [[package]]
 name = "oci-runner"
 version = "0.1.11"
 dependencies = [
- "block2",
  "cc",
  "clap",
  "dispatch2",
- "flate2",
  "libc",
  "objc2",
- "objc2-foundation",
  "objc2-virtualization",
- "zstd",
+ "oci-util",
 ]
 
 [[package]]
@@ -856,7 +849,14 @@ name = "oci-util"
 version = "0.1.11"
 dependencies = [
  "base64 0.23.1",
+ "block2",
  "ciborium",
+ "dispatch2",
+ "flate2",
+ "libc",
+ "objc2",
+ "objc2-foundation",
+ "objc2-virtualization",
  "p256",
  "p384",
  "p521",
@@ -867,6 +867,7 @@ dependencies = [
  "sha2 0.10.9",
  "time",
  "x509-parser",
+ "zstd",
 ]
 
 [[package]]
