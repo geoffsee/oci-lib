@@ -17,6 +17,7 @@ const (
 	codeUnsupported = 8
 	codeInternal    = 9
 	codeState       = 10
+	codeTimeout     = 11
 )
 
 var errInput = errors.New("stdin input failed")
@@ -50,6 +51,16 @@ type authConfig struct {
 
 // opRequest is the JSON vocabulary shared with src/engine.rs.
 type opRequest struct {
+	Rootfs  string           `json:"rootfs"`
+	User    string           `json:"user"`
+	Groups  []uint32         `json:"groups"`
+	Strict  bool             `json:"strict"`
+	Timeout int64            `json:"timeout"`
+	FD      int              `json:"fd"`
+	Header  []byte           `json:"header"`
+	Session streamingSession `json:"session"`
+	LogPath string           `json:"log_path"`
+
 	Op        string          `json:"op"`
 	StoreRoot string          `json:"store_root"`
 	StateRoot string          `json:"state_root"`
@@ -75,6 +86,11 @@ func dispatch(req *opRequest, hooks *ioHooks) (string, error) {
 		err      error
 	)
 	switch req.Op {
+	case "resolve_user":
+		response, err = opResolveUser(req)
+	case "spdy":
+		err = opSPDY(req)
+
 	case "pull_image":
 		response, err = opPullImage(req)
 	case "list_images":

@@ -98,8 +98,17 @@ impl LinuxEngine {
         // `start`, start_container leaks its box on purpose and wait_container
         // cannot reclaim it (the pointer lives in the shim), so the start
         // path goes through call_start below instead.
-        let mut out_box = on_output.map(|cb| Box::new(Sink { callback: cb }));
-        let mut in_box = next_input.map(|cb| Box::new(Source { next: cb }));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let mut out_box = on_output.map(|cb| {
+            Box::new(Sink {
+                callback: cb,
+                input_cancelled: Some(cancelled.clone()),
+            })
+        });
+        let mut in_box = next_input
+            .map(|cb| Source::new(cb, cancelled.clone()))
+            .transpose()?
+            .map(Box::new);
         let mut out = ffi::RokBuffer::zero();
         let mut err = ffi::RokError::zero();
         let rc = unsafe {
@@ -142,10 +151,55 @@ impl LinuxEngine {
 
 struct Sink {
     callback: OutputSink,
+    input_cancelled: Option<Arc<AtomicBool>>,
 }
 
 struct Source {
-    next: InputSource,
+    cancelled: Arc<AtomicBool>,
+    input: std::sync::Mutex<(
+        std::sync::mpsc::Receiver<Vec<u8>>,
+        std::collections::VecDeque<u8>,
+    )>,
+}
+
+impl Source {
+    fn new(next: InputSource, cancelled: Arc<AtomicBool>) -> Result<Self> {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        // A caller's blocking read must never keep a Go callback alive after
+        // exec exits. This worker owns its closure; no FFI pointer escapes.
+        std::thread::Builder::new()
+            .name("oci-exec-input".into())
+            .spawn(move || {
+                while let Ok(bytes) = catch_unwind(AssertUnwindSafe(|| next())) {
+                    let eof = bytes.is_empty();
+                    if tx.send(bytes).is_err() || eof {
+                        break;
+                    }
+                }
+            })
+            .map_err(internal)?;
+        Ok(Self {
+            cancelled,
+            input: std::sync::Mutex::new((rx, Default::default())),
+        })
+    }
+
+    fn read(&self, cap: usize) -> Vec<u8> {
+        let mut input = self.input.lock().unwrap_or_else(|p| p.into_inner());
+        while input.1.is_empty() {
+            if self.cancelled.load(Ordering::Acquire) {
+                return Vec::new();
+            }
+            match input.0.recv_timeout(std::time::Duration::from_millis(20)) {
+                Ok(bytes) if bytes.is_empty() => return Vec::new(),
+                Ok(bytes) => input.1.extend(bytes),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => return Vec::new(),
+            }
+        }
+        let count = cap.min(input.1.len());
+        input.1.drain(..count).collect()
+    }
 }
 
 unsafe extern "C" fn trampoline_out(
@@ -157,7 +211,14 @@ unsafe extern "C" fn trampoline_out(
     if user.is_null() || data.is_null() || len == 0 {
         return;
     }
+    // SAFETY: the shim joins every output callback before the owning box is dropped.
     let sink = unsafe { &*(user as *const Sink) };
+    if stream == 0 {
+        if let Some(cancelled) = &sink.input_cancelled {
+            cancelled.store(true, Ordering::Release);
+        }
+        return;
+    }
     let bytes = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len) };
     let _ = catch_unwind(AssertUnwindSafe(|| (sink.callback)(stream as u8, bytes)));
 }
@@ -166,8 +227,9 @@ unsafe extern "C" fn trampoline_in(user: *mut c_void, buf: *mut c_char, cap: usi
     if user.is_null() || buf.is_null() || cap == 0 {
         return -1;
     }
+    // SAFETY: Source remains owned by call_io until Go's input pump has joined.
     let source = unsafe { &*(user as *const Source) };
-    let result = catch_unwind(AssertUnwindSafe(|| (source.next)()));
+    let result = catch_unwind(AssertUnwindSafe(|| source.read(cap)));
     match result {
         Ok(bytes) if bytes.is_empty() => 0,
         Ok(bytes) => {
@@ -184,6 +246,21 @@ fn parse<T: serde::de::DeserializeOwned>(value: Value) -> Result<T> {
 }
 
 impl Engine for LinuxEngine {
+    fn serve_spdy(
+        &self,
+        socket: std::net::TcpStream,
+        header: &[u8],
+        session: &crate::streaming::SessionKind,
+        log_path: Option<&str>,
+    ) -> Result<()> {
+        use base64::Engine as _;
+        use std::os::fd::AsRawFd;
+        // net.FileConn duplicates the descriptor; this owned stream remains
+        // alive until the synchronous shim call and all its streams finish.
+        self.call(json!({"op":"spdy", "fd":socket.as_raw_fd(), "header":base64::engine::general_purpose::STANDARD.encode(header), "session":session, "log_path":log_path.unwrap_or_default()}))?;
+        Ok(())
+    }
+
     fn pull_image(&self, image: &str, auth: Option<&Auth>, insecure: bool) -> Result<String> {
         let value = self.call(json!({
             "op": "pull_image", "image": image, "auth": auth, "insecure": insecure,
@@ -216,6 +293,16 @@ impl Engine for LinuxEngine {
         Ok(())
     }
 
+    fn resolve_user(
+        &self,
+        rootfs: &str,
+        selected: &str,
+        groups: &[u32],
+        strict: bool,
+    ) -> Result<crate::engine::ResolvedUser> {
+        parse(self.call(json!({"op":"resolve_user", "rootfs":rootfs, "user":selected, "groups":groups, "strict":strict}))?)
+    }
+
     fn create_container(&self, id: &str, spec_json: &str) -> Result<()> {
         let spec: Value = serde_json::from_str(spec_json).map_err(internal)?;
         self.call(json!({"op": "create", "id": id, "spec": spec}))?;
@@ -231,6 +318,7 @@ impl Engine for LinuxEngine {
         // shutdown. (The shim contract documents this lifetime.)
         let boxed = Box::new(Sink {
             callback: on_output,
+            input_cancelled: None,
         });
         let user = Box::leak(boxed) as *mut Sink;
         let mut out = ffi::RokBuffer::zero();
@@ -297,11 +385,10 @@ impl Engine for LinuxEngine {
                 .extend_from_slice(data);
         });
         let value = self.call_io(
-            json!({"op": "exec", "id": id, "cmd": cmd, "tty": false}),
+            json!({"op": "exec", "id": id, "cmd": cmd, "tty": false, "timeout":timeout_secs}),
             Some(sink),
             None,
         )?;
-        let _ = timeout_secs; // enforced by the caller via a watchdog thread
         Ok(ExecOutput {
             exit_code: value["exit_code"].as_i64().unwrap_or(-1) as i32,
             stdout: stdout.lock().unwrap_or_else(|p| p.into_inner()).clone(),
@@ -386,4 +473,39 @@ unsafe fn read_buf(buf: &ffi::RokBuffer) -> String {
     }
     let bytes = unsafe { std::slice::from_raw_parts(buf.data as *const u8, buf.len) };
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+#[cfg(test)]
+mod input_regressions {
+    use super::*;
+    use std::sync::{Mutex, mpsc};
+    use std::time::Duration;
+
+    #[test]
+    fn interactive_input_preserves_chunks_and_cancels_a_blocked_read() {
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let rx = Mutex::new(rx);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let source = Arc::new(
+            Source::new(
+                Arc::new(move || rx.lock().unwrap().recv().unwrap_or_default()),
+                cancelled.clone(),
+            )
+            .unwrap(),
+        );
+        tx.send(vec![7; 100]).unwrap();
+        assert_eq!(source.read(4), vec![7; 4]);
+        assert_eq!(source.read(200), vec![7; 96]);
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || done_tx.send(source.read(20)).unwrap());
+        cancelled.store(true, Ordering::Release);
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .is_empty()
+        );
+        drop(tx);
+        worker.join().unwrap();
+    }
 }

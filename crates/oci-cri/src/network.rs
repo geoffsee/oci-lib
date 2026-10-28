@@ -103,6 +103,7 @@ pub fn setup(
     if !port_mappings.is_empty() {
         let mappings: Vec<Value> = port_mappings
             .iter()
+            .filter(|m| m.host_port > 0)
             .map(|m| {
                 serde_json::json!({
                     "hostPort": m.host_port,
@@ -116,7 +117,7 @@ pub fn setup(
             for plugin in plugins.iter_mut() {
                 let kind = plugin["type"].as_str().unwrap_or("");
                 if kind == "portmap" {
-                    plugin["portMappings"] = Value::Array(mappings.clone());
+                    plugin["runtimeConfig"] = serde_json::json!({"portMappings": mappings});
                 }
             }
         }
@@ -337,5 +338,57 @@ mod tests {
         let result = setup(&config, "sandbox1", Path::new("/proc/self/ns/net"), &[]).unwrap();
         assert_eq!(result.ips, ["10.1.0.3/24"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn host_ports_are_passed_as_cni_runtime_capabilities() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = dir.path().join("portmap");
+        let captured = dir.path().join("request.json");
+        std::fs::write(
+            &plugin,
+            format!(
+                "#!/bin/sh\ncat > '{}'\necho '{{\"cniVersion\":\"1.0.0\"}}'\n",
+                captured.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&plugin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let configs = dir.path().join("conf");
+        std::fs::create_dir(&configs).unwrap();
+        std::fs::write(configs.join("net.conflist"), r#"{"cniVersion":"1.0.0","name":"test","plugins":[{"type":"portmap","capabilities":{"portMappings":true}}]}"#).unwrap();
+        let config = Config {
+            cni_bin_dir: Some(dir.path().into()),
+            cni_conf_dir: Some(configs),
+            ..Config::default()
+        };
+        setup(
+            &config,
+            "pod",
+            Path::new("/proc/self/ns/net"),
+            &[
+                PortMapping {
+                    host_port: 8080,
+                    container_port: 80,
+                    ..Default::default()
+                },
+                PortMapping {
+                    container_port: 90,
+                    ..Default::default()
+                },
+            ],
+        )
+        .unwrap();
+        let input: Value = serde_json::from_slice(&std::fs::read(captured).unwrap()).unwrap();
+        assert_eq!(
+            input["runtimeConfig"]["portMappings"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(input["runtimeConfig"]["portMappings"][0]["hostPort"], 8080);
+        assert!(input.get("portMappings").is_none());
     }
 }

@@ -2,13 +2,9 @@
 
 //! Exec/Attach/PortForward streaming server.
 //!
-//! kubelet's remote-command client speaks the Kubernetes streaming protocol
-//! over a WebSocket upgrade: every message is a channel byte (`0` stdin,
-//! `1` stdout, `2` stderr, `3` error, `4` resize) followed by payload. This
-//! server implements that protocol directly over TCP (the client negotiates
-//! `v4.channel.k8s.io`-style subprotocols), so no HTTP framework is needed.
-//! Sessions are single-use tokens handed out by the CRI `Exec`, `Attach`,
-//! and `PortForward` calls.
+//! Kubelet can upgrade single-use session URLs with SPDY/3.1 or the
+//! Kubernetes WebSocket channel protocol. WebSocket channels are handled
+//! here; Linux hands authenticated SPDY sockets to Kubernetes' Go transport.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -26,7 +22,8 @@ use crate::engine::Engine;
 use crate::store::Store;
 
 /// What one streaming token does when the client connects.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionKind {
     /// Run a command interactively in a container.
     Exec {
@@ -38,6 +35,10 @@ pub enum SessionKind {
         tty: bool,
         /// Whether stdin is forwarded.
         stdin: bool,
+        /// Whether stdout is forwarded.
+        stdout: bool,
+        /// Whether stderr is forwarded.
+        stderr: bool,
     },
     /// Attach to a running container's streams (log follow + stdin).
     Attach {
@@ -45,8 +46,14 @@ pub enum SessionKind {
         container_id: String,
         /// Whether stdin is forwarded.
         stdin: bool,
+        /// Close container stdin when this attachment reaches EOF.
+        stdin_once: bool,
         /// Whether a terminal was requested.
         tty: bool,
+        /// Whether stdout is forwarded.
+        stdout: bool,
+        /// Whether stderr is forwarded.
+        stderr: bool,
     },
     /// Forward connections to the sandbox IP.
     PortForward {
@@ -174,15 +181,42 @@ async fn handle_connection(
     mut socket: TcpStream,
     state: Arc<StreamingState>,
 ) -> std::io::Result<()> {
-    let (path, protocol) = websocket_handshake(&mut socket).await?;
+    let (path, protocol, header) = websocket_handshake(&mut socket).await?;
     let mut parts = path.split('/').filter(|p| !p.is_empty());
     let segment = parts.next().unwrap_or("").to_string();
     let token = parts.next().unwrap_or("").to_string();
-    let _ = protocol;
     let Some(kind) = state.take(&token) else {
+        if protocol == "SPDY/3.1" {
+            socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+            return Ok(());
+        }
         let _ = ws_send(&mut socket, 3, br#"{"metadata":{},"status":"Failure","message":"unknown or expired streaming token","code":404}"#, true).await;
         return Ok(());
     };
+    if protocol == "SPDY/3.1" {
+        let log_path = match &kind {
+            SessionKind::Attach { container_id, .. } => {
+                state.store.container(container_id).map(|c| c.log_path)
+            }
+            _ => None,
+        };
+        let socket = socket.into_std()?;
+        socket.set_nonblocking(false)?;
+        let guard = StreamingSocket(socket.try_clone()?);
+        let engine = Arc::clone(&state.engine);
+        let result = tokio::task::spawn_blocking(move || {
+            engine.serve_spdy(socket, &header, &kind, log_path.as_deref())
+        })
+        .await;
+        drop(guard);
+        return result
+            .map_err(std::io::Error::other)?
+            .map_err(std::io::Error::other);
+    }
     match (segment.as_str(), kind) {
         (
             "exec",
@@ -191,6 +225,7 @@ async fn handle_connection(
                 cmd,
                 tty,
                 stdin,
+                ..
             },
         ) => run_exec(socket, state, container_id, cmd, tty, stdin).await,
         (
@@ -199,6 +234,7 @@ async fn handle_connection(
                 container_id,
                 stdin,
                 tty,
+                ..
             },
         ) => run_attach(socket, state, container_id, stdin, tty).await,
         ("portforward", SessionKind::PortForward { ip, .. }) => run_port_forward(socket, ip).await,
@@ -207,7 +243,14 @@ async fn handle_connection(
 }
 
 /// Read the HTTP upgrade request and reply `101`, returning (path, subprotocol).
-async fn websocket_handshake(socket: &mut TcpStream) -> std::io::Result<(String, String)> {
+struct StreamingSocket(std::net::TcpStream);
+impl Drop for StreamingSocket {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+async fn websocket_handshake(socket: &mut TcpStream) -> std::io::Result<(String, String, Vec<u8>)> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
     loop {
@@ -233,17 +276,28 @@ async fn websocket_handshake(socket: &mut TcpStream) -> std::io::Result<(String,
         .to_string();
     let mut key = String::new();
     let mut protocol = String::new();
+    let mut spdy = false;
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
         };
         match name.trim().to_ascii_lowercase().as_str() {
+            "upgrade" if value.trim().eq_ignore_ascii_case("SPDY/3.1") => spdy = true,
             "sec-websocket-key" => key = value.trim().to_string(),
             "sec-websocket-protocol" => {
                 protocol = value.split(',').next().unwrap_or("").trim().to_string()
             }
             _ => {}
         }
+    }
+    if spdy {
+        return Ok((path, "SPDY/3.1".into(), buf));
+    }
+    if key.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "unsupported streaming upgrade",
+        ));
     }
     let mut hasher = Sha1::new();
     hasher.update(key.as_bytes());
@@ -257,7 +311,7 @@ async fn websocket_handshake(socket: &mut TcpStream) -> std::io::Result<(String,
     }
     response.push_str("\r\n");
     socket.write_all(response.as_bytes()).await?;
-    Ok((path, protocol))
+    Ok((path, protocol, Vec::new()))
 }
 
 /// One decoded WebSocket message.
@@ -365,10 +419,13 @@ async fn run_exec(
     container_id: String,
     cmd: Vec<String>,
     tty: bool,
-    _stdin: bool,
+    stdin: bool,
 ) -> std::io::Result<()> {
     let (ws_out_tx, mut ws_out_rx) = mpsc::channel::<(u8, Vec<u8>)>(64);
     let (in_tx, in_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    if !stdin {
+        let _ = in_tx.send(Vec::new());
+    }
     let in_rx = Arc::new(Mutex::new(in_rx));
     let engine = Arc::clone(&state.engine);
     let exec_container = container_id.clone();
@@ -450,12 +507,14 @@ async fn run_attach(
                         let mut fields = line.splitn(4, ' ');
                         let _ = fields.next();
                         let stream = fields.next().unwrap_or("stdout");
-                        let _ = fields.next();
+                        let tag = fields.next().unwrap_or("F");
                         let payload = fields.next().unwrap_or("");
                         let channel = if stream == "stderr" { 2 } else { 1 };
                         let mut data = vec![channel];
                         data.extend_from_slice(payload.as_bytes());
-                        data.push(b'\n');
+                        if tag == "F" {
+                            data.push(b'\n');
+                        }
                         if ws_frame(&mut writer, 2, &data).await.is_err() {
                             return;
                         }
@@ -577,6 +636,8 @@ mod tests {
             cmd: vec!["/bin/true".into()],
             tty: false,
             stdin: false,
+            stdout: true,
+            stderr: true,
         });
         assert!(state.take(&token).is_some());
         assert!(state.take(&token).is_none());

@@ -23,6 +23,8 @@ pub enum ErrorCode {
     Internal = 9,
     /// The runtime is in the wrong state for this operation.
     State = 10,
+    /// A command exceeded its deadline and was terminated.
+    Timeout = 11,
 }
 
 impl ErrorCode {
@@ -40,6 +42,7 @@ impl ErrorCode {
             5 => Self::Run,
             8 => Self::Unsupported,
             10 => Self::State,
+            11 => Self::Timeout,
             _ => Self::Internal,
         }
     }
@@ -53,6 +56,7 @@ impl ErrorCode {
             Self::Unsupported => "unsupported on this platform",
             Self::Internal => "internal error",
             Self::State => "runtime is in the wrong state",
+            Self::Timeout => "operation timed out",
         }
     }
 }
@@ -120,6 +124,7 @@ impl From<Error> for tonic::Status {
             ErrorCode::NotFound => tonic::Status::not_found(message),
             ErrorCode::State => tonic::Status::failed_precondition(message),
             ErrorCode::Unsupported => tonic::Status::unimplemented(message),
+            ErrorCode::Timeout => tonic::Status::deadline_exceeded(message),
             _ => tonic::Status::internal(message),
         }
     }

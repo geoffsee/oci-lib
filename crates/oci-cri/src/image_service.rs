@@ -47,10 +47,7 @@ fn matches(image: &EngineImage, filter: Option<&ImageFilter>) -> bool {
     let Some(wanted) = &filter.image else {
         return true;
     };
-    wanted.image.is_empty()
-        || image.id == wanted.image
-        || image.repo_tags.iter().any(|t| t == &wanted.image)
-        || image.repo_digests.iter().any(|d| d == &wanted.image)
+    wanted.image.is_empty() || image.matches_reference(&wanted.image)
 }
 
 #[tonic::async_trait]
@@ -102,11 +99,7 @@ impl ImageService for CriService {
             .list_images("")
             .map_err(Status::from)?
             .into_iter()
-            .find(|image| {
-                image.id == wanted
-                    || image.repo_tags.iter().any(|t| t == &wanted)
-                    || image.repo_digests.iter().any(|d| d == &wanted)
-            });
+            .find(|image| image.matches_reference(&wanted));
         Ok(Response::new(ImageStatusResponse {
             image: found.as_ref().map(to_image),
             info: if request.verbose {
@@ -167,13 +160,14 @@ impl ImageService for CriService {
         let present = self
             .inner
             .engine
-            .list_images(&wanted)
-            .map(|images| !images.is_empty())
-            .unwrap_or(false);
-        if present {
+            .list_images("")
+            .map_err(Status::from)?
+            .into_iter()
+            .find(|image| image.matches_reference(&wanted));
+        if let Some(image) = present {
             self.inner
                 .engine
-                .remove_image(&wanted)
+                .remove_image(&image.id)
                 .map_err(Status::from)?;
         }
         Ok(Response::new(RemoveImageResponse {}))
@@ -221,6 +215,20 @@ mod tests {
             size: 42,
             ..EngineImage::default()
         }
+    }
+
+    #[test]
+    fn untagged_image_lookup_uses_latest() {
+        let image = sample("registry.example/app:latest");
+        assert!(matches(
+            &image,
+            Some(&ImageFilter {
+                image: Some(ImageSpec {
+                    image: "registry.example/app".into(),
+                    ..Default::default()
+                })
+            })
+        ));
     }
 
     #[test]

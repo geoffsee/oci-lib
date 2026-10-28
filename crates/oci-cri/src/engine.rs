@@ -63,6 +63,29 @@ pub struct EngineImage {
     pub spec: Option<ImageSpec>,
 }
 
+impl EngineImage {
+    /// Match the stored identity or a name, treating an omitted tag as latest.
+    pub(crate) fn matches_reference(&self, requested: &str) -> bool {
+        let normalized = if !requested.contains('@')
+            && !requested
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .contains(':')
+        {
+            format!("{requested}:latest")
+        } else {
+            requested.to_string()
+        };
+        self.id == requested
+            || self
+                .repo_tags
+                .iter()
+                .any(|name| name == requested || name == &normalized)
+            || self.repo_digests.iter().any(|name| name == requested)
+    }
+}
+
 /// The parts of an image config the runtime needs without an engine round trip.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImageSpec {
@@ -103,6 +126,12 @@ pub struct EngineState {
     /// Exit code once stopped, `-1` while unknown.
     #[serde(default = "minus_one")]
     pub exit_code: i32,
+    /// Whether this container's memory cgroup recorded an OOM kill.
+    #[serde(default)]
+    pub oom_killed: bool,
+    /// Stable runtime-owned namespace paths, pinned before init exec.
+    #[serde(default)]
+    pub namespaces: BTreeMap<String, String>,
 }
 
 fn minus_one() -> i32 {
@@ -173,6 +202,18 @@ pub type OutputSink = Arc<dyn Fn(u8, &[u8]) + Send + Sync>;
 /// Supplies stdin bytes to an interactive exec. Returning an empty vec is EOF.
 pub type InputSource = Arc<dyn Fn() -> Vec<u8> + Send + Sync>;
 
+/// Identity resolved against the container image filesystem.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResolvedUser {
+    /// Effective user ID.
+    pub uid: u32,
+    /// Primary group ID.
+    pub gid: u32,
+    /// Supplementary groups, including the primary group.
+    #[serde(default, rename = "additionalGids")]
+    pub additional_gids: Vec<u32>,
+}
+
 /// Container and image operations. Implementations must be safe to call from
 /// many threads; lifecycle calls for one container are serialised by the
 /// service layer above.
@@ -195,6 +236,36 @@ pub trait Engine: Send + Sync {
 
     /// Release a rootfs prepared by [`Engine::prepare_rootfs`].
     fn release_rootfs(&self, id: &str) -> Result<()>;
+
+    /// Resolve image account names and Merge/Strict supplemental groups.
+    fn resolve_user(
+        &self,
+        _rootfs: &str,
+        selected: &str,
+        groups: &[u32],
+        _strict: bool,
+    ) -> Result<ResolvedUser> {
+        let (uid, gid, _) = crate::convert::parse_user(selected);
+        if selected
+            .split(':')
+            .any(|part| !part.is_empty() && part.parse::<u32>().is_err())
+        {
+            return Err(crate::Error::new(
+                crate::ErrorCode::Unsupported,
+                "named user resolution is unavailable",
+                selected,
+            ));
+        }
+        let mut additional_gids = groups.to_vec();
+        additional_gids.push(gid);
+        additional_gids.sort_unstable();
+        additional_gids.dedup();
+        Ok(ResolvedUser {
+            uid,
+            gid,
+            additional_gids,
+        })
+    }
 
     /// Create (but do not start) a container from an OCI runtime spec JSON.
     fn create_container(&self, id: &str, spec_json: &str) -> Result<()>;
@@ -243,6 +314,21 @@ pub trait Engine: Send + Sync {
 
     /// Checkpoint a container into an image.
     fn checkpoint(&self, id: &str, image: &str, parent: &str) -> Result<()>;
+
+    /// Serve an authenticated, single-use SPDY session on an accepted socket.
+    fn serve_spdy(
+        &self,
+        _socket: std::net::TcpStream,
+        _header: &[u8],
+        _session: &crate::streaming::SessionKind,
+        _log_path: Option<&str>,
+    ) -> Result<()> {
+        Err(crate::error::Error::new(
+            crate::error::ErrorCode::Unsupported,
+            "SPDY streaming is unavailable for this engine",
+            "",
+        ))
+    }
 
     /// Multi-line human-readable readiness report.
     fn diagnose(&self) -> Result<String>;

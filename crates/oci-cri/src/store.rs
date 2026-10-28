@@ -142,6 +142,9 @@ pub struct ContainerRecord {
     /// OCI runtime spec JSON used at create time.
     #[serde(default)]
     pub spec_json: String,
+    /// Original CRI ContainerConfig, encoded with protobuf for status reporting.
+    #[serde(default)]
+    pub config_bytes: Vec<u8>,
     /// Rootfs path returned by the engine.
     #[serde(default)]
     pub rootfs: String,
@@ -452,6 +455,7 @@ mod tests {
             reason: String::new(),
             message: String::new(),
             spec_json: String::new(),
+            config_bytes: Vec::new(),
             rootfs: String::new(),
             stop_signal: String::new(),
         }

@@ -14,7 +14,10 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
+	"github.com/opencontainers/cgroups/fs"
+	"github.com/opencontainers/cgroups/fs2"
 	"github.com/opencontainers/runc/libcontainer"
 	"github.com/opencontainers/runc/libcontainer/specconv"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -27,17 +30,19 @@ import (
 // restart via libcontainer.Load.
 
 type handle struct {
-	startMu   sync.Mutex
-	startErr  error
-	container *libcontainer.Container
-	process   *libcontainer.Process
-	stdin     io.WriteCloser
-	pumps     sync.WaitGroup
+	namespaces map[string]*os.File
+	startMu    sync.Mutex
+	startErr   error
+	container  *libcontainer.Container
+	process    *libcontainer.Process
+	stdin      io.WriteCloser
+	pumps      sync.WaitGroup
 	// Result fields are published by closing waitDone. Only one goroutine
 	// calls Process.Wait, including for sandbox init processes.
-	waitDone chan struct{}
-	waitErr  error
-	exitCode int
+	waitDone  chan struct{}
+	waitErr   error
+	oomKilled bool
+	exitCode  int
 }
 
 var (
@@ -117,6 +122,9 @@ func opCreate(req *opRequest) error {
 	}
 	if err := os.MkdirAll(specDir(req.StoreRoot), 0o700); err != nil {
 		return fail(codeInternal, "spec directory", err.Error())
+	}
+	if err := applySecurity(&spec); err != nil {
+		return err
 	}
 	rootless := os.Geteuid() != 0
 	if rootless {
@@ -209,10 +217,8 @@ func opStart(req *opRequest, hooks *ioHooks) (retErr error) {
 		ConsoleWidth:  0,
 		ConsoleHeight: 0,
 	}
-	if spec.Process.User.UID != 0 || spec.Process.User.GID != 0 {
-		process.UID = int(spec.Process.User.UID)
-		process.GID = int(spec.Process.User.GID)
-	}
+	process.UID = int(spec.Process.User.UID)
+	process.GID = int(spec.Process.User.GID)
 	for _, gid := range spec.Process.User.AdditionalGids {
 		process.AdditionalGroups = append(process.AdditionalGroups, int(gid))
 	}
@@ -225,6 +231,8 @@ func opStart(req *opRequest, hooks *ioHooks) (retErr error) {
 	started := false
 	defer func() {
 		if !started {
+			closeNamespaces(h.namespaces)
+			h.namespaces = nil
 			_ = stdinWrite.Close()
 			h.stdin = nil
 		}
@@ -258,6 +266,14 @@ func opStart(req *opRequest, hooks *ioHooks) (retErr error) {
 	}
 	initStarted = true
 	h.process = process
+	pid, err := process.Pid()
+	if err != nil {
+		return fail(codeRun, "container pid before exec", err.Error())
+	}
+	h.namespaces, err = pinNamespaces(pid)
+	if err != nil {
+		return fail(codeRun, "pin container namespaces", err.Error())
+	}
 	if err := h.container.Exec(); err != nil {
 		return fail(codeRun, "exec container init", err.Error())
 	}
@@ -271,6 +287,7 @@ func opStart(req *opRequest, hooks *ioHooks) (retErr error) {
 		} else {
 			h.exitCode = exitCode(state)
 		}
+		h.oomKilled = containerOOMKilled(h.container)
 		close(h.waitDone)
 	}()
 	started = true
@@ -319,7 +336,7 @@ func opWait(req *opRequest) (any, error) {
 	if h.waitErr != nil {
 		return nil, h.waitErr
 	}
-	return map[string]any{"exit_code": h.exitCode}, nil
+	return map[string]any{"exit_code": h.exitCode, "oom_killed": h.oomKilled}, nil
 }
 
 func opKill(req *opRequest) error {
@@ -379,11 +396,27 @@ func opDelete(req *opRequest) error {
 	if err := h.container.Destroy(); err != nil {
 		return fail(codeRun, "destroy container", err.Error())
 	}
+	closeNamespaces(h.namespaces)
+	h.namespaces = nil
 	handlesMu.Lock()
 	delete(handles, req.ID)
 	handlesMu.Unlock()
 	_ = os.Remove(filepath.Join(specDir(req.StoreRoot), req.ID+".json"))
 	return nil
+}
+
+func containerOOMKilled(container *libcontainer.Container) bool {
+	state, err := container.State()
+	if err != nil {
+		return false
+	}
+	var count uint64
+	if path := state.CgroupPaths[""]; path != "" {
+		count, err = fs2.OOMKillCount(path)
+	} else if path := state.CgroupPaths["memory"]; path != "" {
+		count, err = fs.OOMKillCount(path)
+	}
+	return err == nil && count > 0
 }
 
 func opState(req *opRequest) (any, error) {
@@ -402,13 +435,13 @@ func opState(req *opRequest) (any, error) {
 				if h.waitErr != nil {
 					return nil, h.waitErr
 				}
-				return map[string]any{"status": "stopped", "pid": 0, "exit_code": h.exitCode}, nil
+				return map[string]any{"status": "stopped", "pid": 0, "exit_code": h.exitCode, "oom_killed": h.oomKilled}, nil
 			default:
 				pid, err := h.process.Pid()
 				if err != nil {
 					return nil, fail(codeInternal, "container pid", err.Error())
 				}
-				return map[string]any{"status": "running", "pid": pid, "exit_code": -1}, nil
+				return map[string]any{"status": "running", "pid": pid, "exit_code": -1, "namespaces": namespacePaths(h.namespaces)}, nil
 			}
 		}
 		h.startMu.Unlock()
@@ -596,7 +629,10 @@ func opExec(req *opRequest, hooks *ioHooks) (any, error) {
 	if len(req.Cmd) == 0 {
 		return nil, fail(codeInvalid, "exec command is empty", "")
 	}
-	spec, _ := savedSpec(req.StoreRoot, req.ID)
+	spec, err := savedSpec(req.StoreRoot, req.ID)
+	if err != nil {
+		return nil, err
+	}
 	process := &libcontainer.Process{
 		Args: req.Cmd,
 		Init: false,
@@ -606,11 +642,35 @@ func opExec(req *opRequest, hooks *ioHooks) (any, error) {
 		process.Cwd = spec.Process.Cwd
 		process.UID = int(spec.Process.User.UID)
 		process.GID = int(spec.Process.User.GID)
+		for _, gid := range spec.Process.User.AdditionalGids {
+			process.AdditionalGroups = append(process.AdditionalGroups, int(gid))
+		}
 	}
 	if hooks != nil && hooks.readInput != nil {
-		process.Stdin = &callbackReader{read: hooks.readInput}
-	} else {
-		process.Stdin = nil
+		if hooks.emit == nil {
+			return nil, fail(codeInvalid, "interactive stdin requires a cancellation callback", "")
+		}
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			return nil, fail(codeInternal, "exec stdin", err.Error())
+		}
+		defer reader.Close()
+		process.Stdin = reader
+		inputDone := make(chan struct{})
+		go func() {
+			defer close(inputDone)
+			defer writer.Close()
+			_, _ = io.Copy(writer, &callbackReader{read: hooks.readInput})
+		}()
+		defer func() {
+			// Private control message: cancel the Rust-side blocking source
+			// before joining this callback and releasing its FFI storage.
+			if hooks.emit != nil {
+				hooks.emit(0, []byte{0})
+			}
+			_ = writer.Close()
+			<-inputDone
+		}()
 	}
 	if hooks != nil && hooks.emit != nil {
 		process.Stdout = &callbackWriter{emit: hooks.emit, stream: 1}
@@ -623,7 +683,27 @@ func opExec(req *opRequest, hooks *ioHooks) (any, error) {
 	if err := h.container.Run(process); err != nil {
 		return nil, fail(codeRun, "exec", err.Error())
 	}
-	state, err := process.Wait()
+	type waitResult struct {
+		state *os.ProcessState
+		err   error
+	}
+	waited := make(chan waitResult, 1)
+	go func() { state, err := process.Wait(); waited <- waitResult{state, err} }()
+	var result waitResult
+	if req.Timeout > 0 {
+		timer := time.NewTimer(time.Duration(req.Timeout) * time.Second)
+		defer timer.Stop()
+		select {
+		case result = <-waited:
+		case <-timer.C:
+			_ = process.Signal(syscall.SIGKILL)
+			<-waited
+			return nil, fail(codeTimeout, "exec timed out", "command was killed and reaped")
+		}
+	} else {
+		result = <-waited
+	}
+	state, err := result.state, result.err
 	if err != nil && state == nil {
 		return nil, fail(codeRun, "exec wait", err.Error())
 	}
@@ -720,4 +800,34 @@ func exitCode(state *os.ProcessState) int {
 		return 128 + int(ws.Signal())
 	}
 	return 1
+}
+
+// Pin namespaces while init is blocked on its exec FIFO. During execve,
+// de_thread can temporarily hide /proc/<init-pid>/ns even though the process
+// is alive. Runtime-owned descriptors keep CNI and subsequent joins stable.
+func pinNamespaces(pid int) (map[string]*os.File, error) {
+	result := map[string]*os.File{}
+	for _, name := range []string{"net", "ipc", "uts", "pid"} {
+		file, err := os.Open(fmt.Sprintf("/proc/%d/ns/%s", pid, name))
+		if err != nil {
+			closeNamespaces(result)
+			return nil, err
+		}
+		result[name] = file
+	}
+	return result, nil
+}
+
+func namespacePaths(files map[string]*os.File) map[string]string {
+	result := map[string]string{}
+	for name, file := range files {
+		result[name] = fmt.Sprintf("/proc/%d/fd/%d", os.Getpid(), file.Fd())
+	}
+	return result
+}
+
+func closeNamespaces(files map[string]*os.File) {
+	for _, file := range files {
+		_ = file.Close()
+	}
 }

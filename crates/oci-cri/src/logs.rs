@@ -75,6 +75,22 @@ impl CriLogWriter {
         for text in &lines {
             let _ = write_line(state.file.as_mut(), name, "F", text);
         }
+        // Interactive attach must deliver prompts and `echo -n` output
+        // before a newline or process exit. CRI partial records preserve
+        // that boundary without inventing a newline in the byte stream.
+        let partial = if stream == STDERR {
+            std::mem::take(&mut state.pending_stderr)
+        } else {
+            std::mem::take(&mut state.pending_stdout)
+        };
+        if !partial.is_empty() {
+            let _ = write_line(
+                state.file.as_mut(),
+                name,
+                "P",
+                &String::from_utf8_lossy(&partial),
+            );
+        }
     }
 
     /// Flush any unterminated output as partial (`P`) lines.
@@ -175,9 +191,19 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 3, "{text}");
         assert!(lines[0].ends_with("stdout F hello"), "{}", lines[0]);
-        assert!(lines[1].ends_with("stderr F oops"), "{}", lines[1]);
-        assert!(lines[2].ends_with("stdout P wor"), "{}", lines[2]);
+        assert!(lines[1].ends_with("stdout P wor"), "{}", lines[1]);
+        assert!(lines[2].ends_with("stderr F oops"), "{}", lines[2]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn interactive_partial_output_is_visible_before_eof() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("interactive.log");
+        let writer = CriLogWriter::open(&path).unwrap();
+        writer.write(STDOUT, b"prompt> ");
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.ends_with(" stdout P prompt> \n"));
     }
 
     #[test]

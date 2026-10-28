@@ -149,6 +149,7 @@ fn link_go_archive(
         "exclude_graphdriver_btrfs".to_string(),
         "exclude_graphdriver_devicemapper".to_string(),
         "containers_image_openpgp".to_string(),
+        "apparmor".to_string(),
     ];
     let skip_optional = env::var_os("ROK_DISABLE_OPTIONAL_LIBS").is_some();
     let seccomp = if skip_optional {

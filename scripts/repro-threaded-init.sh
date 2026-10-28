@@ -47,7 +47,7 @@ image=${COREDNS_IMAGE:-docker.io/coredns/coredns:1.14.4}
 cri pull "$image" > "$out/pull.txt" 2>&1
 jq -n --arg out "$out" --arg uid "threaded-init-$$" '{metadata:{name:$uid,namespace:"default",uid:$uid,attempt:0},log_directory:$out,linux:{security_context:{namespace_options:{network:2}}}}' > "$out/pod.json"
 pod=$(cri runp "$out/pod.json")
-jq -n --arg image "$image" --arg out "$out" '{metadata:{name:"threaded",attempt:0},image:{image:$image},command:["/fixture/threaded-init"],log_path:"threaded.log",mounts:[{container_path:"/fixture",host_path:$out}],linux:{}}' > "$out/container.json"
+jq -n --arg image "$image" --arg out "$out" '{metadata:{name:"threaded",attempt:0},image:{image:$image},command:["/fixture/threaded-init"],log_path:"threaded.log",mounts:[{container_path:"/fixture",host_path:$out}],linux:{security_context:{run_as_user:{value:0}}}}' > "$out/container.json"
 id=$(cri create "$pod" "$out/container.json" "$out/pod.json")
 cri start "$id" > "$out/start.txt" 2>&1
 for attempt in $(seq 1 30); do [ -f "$out/ready" ] && break; sleep 1; done
