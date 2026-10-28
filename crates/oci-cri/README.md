@@ -96,6 +96,12 @@ and this crate's `cri_lifecycle` / `streaming_exec` tests.
 
 Supply CNI plugins and a pause image on disk before the first pod.
 
+Seccomp profile enforcement is not implemented. Requests for `RuntimeDefault`,
+`Localhost`, or a legacy confined profile are rejected as unsupported; they are
+never silently downgraded to unconfined. Explicit `Unconfined` and unspecified
+profiles retain the existing behavior. Enabling the build's libseccomp feature
+alone does not implement CRI profile translation.
+
 ## macOS
 
 Without `vm`, macOS links the engine stub (`ErrorCode::Unsupported`).
