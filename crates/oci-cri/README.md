@@ -57,6 +57,16 @@ fn main() -> Result<(), oci_cri::Error> {
 Defaults use the neutral `oci-cri` layout (`/run/oci-cri/...`). Override
 `runtime_name` and paths for product branding.
 
+For Linux embedding into an existing async executor, call
+`server::serve_until(config, shutdown_future).await` after early `startup()`.
+The shutdown future resolves to `()`. The server drains in-flight CRI RPCs,
+closes its streaming listener, and removes its socket. It does not stop
+workload containers; the orchestrator must apply its workload shutdown policy
+first. `serve_with_engine_until` provides the same lifecycle for an explicit
+engine, including the test engine. Streaming bind errors fail startup before
+the CRI socket becomes visible. A supervisor should bound the shutdown wait
+because outstanding RPCs may take time to drain.
+
 ## Surface
 
 Full CRI v1: pod/container lifecycle, Exec/Attach/PortForward streaming,

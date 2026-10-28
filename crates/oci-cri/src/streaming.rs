@@ -127,6 +127,14 @@ impl StreamingState {
 /// Bind the streaming server and serve forever. Records the bound address in
 /// `state` so CRI handlers can mint URLs.
 pub async fn serve(state: Arc<StreamingState>, address: SocketAddr) -> Result<(), crate::Error> {
+    let listener = bind(&state, address).await?;
+    serve_listener(state, listener).await
+}
+
+pub(crate) async fn bind(
+    state: &StreamingState,
+    address: SocketAddr,
+) -> Result<TcpListener, crate::Error> {
     let listener = TcpListener::bind(address).await.map_err(|err| {
         crate::Error::new(
             crate::ErrorCode::Prerequisite,
@@ -138,15 +146,27 @@ pub async fn serve(state: Arc<StreamingState>, address: SocketAddr) -> Result<()
         .local_addr()
         .map_err(|err| crate::Error::new(crate::ErrorCode::Internal, err.to_string(), ""))?;
     *state.addr.lock().unwrap_or_else(|p| p.into_inner()) = Some(local);
+    Ok(listener)
+}
+
+pub(crate) async fn serve_listener(
+    state: Arc<StreamingState>,
+    listener: TcpListener,
+) -> Result<(), crate::Error> {
+    // Dropping the server also cancels its connection tasks.
+    let mut connections = tokio::task::JoinSet::new();
     loop {
-        let (socket, _) = match listener.accept().await {
-            Ok(pair) => pair,
-            Err(_) => continue,
-        };
-        let state = Arc::clone(&state);
-        tokio::spawn(async move {
-            let _ = handle_connection(socket, state).await;
-        });
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (socket, _) = accepted.map_err(|err| crate::Error::new(
+                    crate::ErrorCode::Internal, err.to_string(), ""))?;
+                let state = Arc::clone(&state);
+                connections.spawn(async move {
+                    let _ = handle_connection(socket, state).await;
+                });
+            }
+            _ = connections.join_next(), if !connections.is_empty() => {}
+        }
     }
 }
 
@@ -376,6 +396,7 @@ async fn run_exec(
         }
         writer
     });
+    let _writer_guard = AbortOnDrop(writer_task.abort_handle());
     loop {
         tokio::select! {
             message = ws_read(&mut reader) => {
@@ -452,6 +473,7 @@ async fn run_attach(
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
+    let _follow_guard = AbortOnDrop(follow.abort_handle());
     if stdin {
         loop {
             match ws_read(&mut reader).await {
@@ -509,6 +531,7 @@ async fn run_port_forward(socket: TcpStream, ip: String) -> std::io::Result<()> 
             }
         }
     });
+    let _upstream_guard = AbortOnDrop(up_task.abort_handle());
     loop {
         match ws_read(&mut reader).await {
             Ok(WsMessage::Data(_, data)) if data.len() > 1 => {
@@ -522,6 +545,16 @@ async fn run_port_forward(socket: TcpStream, ip: String) -> std::io::Result<()> 
     }
     up_task.abort();
     Ok(())
+}
+
+// A connection can be cancelled while awaiting its reader or child task.
+// Keep the associated writer/follower from outliving that connection.
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 #[cfg(test)]
