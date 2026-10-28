@@ -21,7 +21,7 @@ cleanup() {
 trap cleanup EXIT
 cat > "$out/fixture/Dockerfile" <<'DOCKER'
 FROM ubuntu:24.04
-RUN apt-get update -qq && apt-get install -y -qq libseccomp2 iproute2 iptables ca-certificates apparmor jq gcc libc6-dev util-linux && rm -rf /var/lib/apt/lists/*
+RUN apt-get update -qq && apt-get install -y -qq libseccomp2 iproute2 iptables ca-certificates apparmor sudo jq gcc libc6-dev util-linux && rm -rf /var/lib/apt/lists/*
 DOCKER
 "$engine" build -t "$image" "$out/fixture" > "$out/image-build.log" 2>&1
 arch=$("$engine" run --rm "$image" uname -m)
@@ -40,6 +40,13 @@ fi
 for tool in crictl critest; do "$engine" cp "$out/tools/$tool" "$name:/usr/local/bin/$tool"; done
 "$engine" start "$name" >/dev/null
 "$engine" exec "$name" mkdir -p /opt/cni/bin /etc/cni/net.d /evidence
+# A fresh container sysfs may omit the securityfs submount needed by the
+# AppArmor loader and by the runtime's loaded-profile checks.
+"$engine" exec "$name" sh -ec '
+    if [ -r /sys/module/apparmor/parameters/enabled ] && grep -q "^Y" /sys/module/apparmor/parameters/enabled; then
+        mountpoint -q /sys/kernel/security || mount -t securityfs securityfs /sys/kernel/security
+    fi
+'
 "$engine" cp "$out/tools/cni/." "$name:/opt/cni/bin/"
 "$engine" exec -i "$name" sh -c 'cat > /etc/cni/net.d/10-test.conflist' <<'CNI'
 {"cniVersion":"1.0.0","name":"oci-conformance","plugins":[{"type":"bridge","bridge":"cri-test0","isGateway":true,"ipMasq":true,"ipam":{"type":"host-local","ranges":[[{"subnet":"10.87.0.0/24"}]],"routes":[{"dst":"0.0.0.0/0"}]}},{"type":"portmap","capabilities":{"portMappings":true}}]}

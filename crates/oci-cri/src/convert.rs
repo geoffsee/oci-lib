@@ -1186,7 +1186,10 @@ fn apparmor_reference(
         match ProfileType::try_from(profile.profile_type) {
             Ok(ProfileType::RuntimeDefault) => return Ok("runtime/default".into()),
             Ok(ProfileType::Unconfined) => return Ok("unconfined".into()),
-            Ok(ProfileType::Localhost) => profile.localhost_ref.as_str(),
+            Ok(ProfileType::Localhost) => profile
+                .localhost_ref
+                .strip_prefix("localhost/")
+                .unwrap_or(&profile.localhost_ref),
             Err(_) => {
                 return Err(Error::new(
                     ErrorCode::InvalidArgument,
@@ -1321,6 +1324,22 @@ mod conformance_validation_regressions {
             image: Some(crate::api::ImageSpec::default()),
             command: vec!["/bin/true".into()],
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn apparmor_accepts_localhost_prefix_in_both_cri_fields() {
+        let legacy = "localhost/deny-write";
+        assert_eq!(apparmor_reference(None, legacy).unwrap(), "deny-write");
+        for name in ["deny-write", legacy] {
+            let profile = SecurityProfile {
+                profile_type: security_profile::ProfileType::Localhost as i32,
+                localhost_ref: name.into(),
+            };
+            assert_eq!(
+                apparmor_reference(Some(&profile), "localhost/other").unwrap(),
+                "deny-write"
+            );
         }
     }
 
