@@ -41,10 +41,10 @@ pub struct EngineImage {
     /// Storage image ID.
     pub id: String,
     /// Tagged names pointing at the image.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub repo_tags: Vec<String>,
     /// Canonical digested names pointing at the image.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub repo_digests: Vec<String>,
     /// Image size in bytes.
     #[serde(default)]
@@ -69,24 +69,24 @@ pub struct ImageSpec {
     /// Image-configured user string.
     pub user: String,
     /// Exposed ports (`<port>/<proto>`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub exposed_ports: BTreeMap<String, String>,
     /// Image environment (`KEY=VALUE`).
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub env: Vec<String>,
     /// Image entrypoint.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub entrypoint: Vec<String>,
     /// Image default command.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub cmd: Vec<String>,
     /// Image volumes.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub volumes: BTreeMap<String, String>,
     /// Image working directory.
     pub working_dir: String,
     /// Image labels.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub labels: BTreeMap<String, String>,
     /// Stop signal name.
     pub stop_signal: String,
@@ -130,7 +130,7 @@ pub struct EngineStats {
     /// System CPU nanoseconds at read time.
     pub cpu_system_ns: u64,
     /// Per-CPU nanoseconds, when available.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub cpu_percpu_ns: Vec<u64>,
     /// Memory usage in bytes.
     pub mem_usage: u64,
@@ -261,5 +261,46 @@ pub(crate) mod serde_bytes_b64 {
         base64::engine::general_purpose::STANDARD
             .decode(text.as_bytes())
             .map_err(serde::de::Error::custom)
+    }
+}
+
+// Go encodes nil slices and maps as JSON null. Treat them like absent
+// collections at this boundary, while retaining validation of non-null values.
+fn null_as_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+
+    #[test]
+    fn image_config_accepts_go_nil_collections() {
+        let image: EngineImage = serde_json::from_value(serde_json::json!({
+            "id": "pause", "repo_tags": null, "repo_digests": null, "size": 10,
+            "spec": {
+                "user": "", "env": null, "entrypoint": ["/pause"], "cmd": null,
+                "exposed_ports": null, "volumes": null, "labels": null,
+                "working_dir": "", "stop_signal": ""
+            }
+        }))
+        .unwrap();
+        assert!(image.repo_tags.is_empty());
+        let spec = image.spec.unwrap();
+        assert_eq!(spec.entrypoint, ["/pause"]);
+        assert!(spec.cmd.is_empty());
+        assert!(spec.env.is_empty());
+        assert!(spec.labels.is_empty());
+    }
+
+    #[test]
+    fn image_config_rejects_wrong_collection_types() {
+        let mut spec = serde_json::to_value(ImageSpec::default()).unwrap();
+        spec["cmd"] = serde_json::json!("not an array");
+        assert!(serde_json::from_value::<ImageSpec>(spec).is_err());
     }
 }

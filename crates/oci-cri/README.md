@@ -24,6 +24,15 @@ sudo target/debug/oci-cri serve \
   --cni-conf-dir /etc/cni/net.d
 ```
 
+On cgroup v2, provide a writable delegated domain hierarchy. In a private
+cgroup namespace, the root must be empty or contain only the runtime process.
+On first container creation the runtime moves itself into an
+`oci-cri-runtime-<pid>` leaf, then enables controllers for sibling workload
+cgroups. It rejects shared or already threaded roots before libcontainer can
+convert the hierarchy to threaded mode. Run a containerized daemon directly as
+PID 1; run diagnostic clients outside its cgroup. Existing diorama host setup
+can supply an empty root with the runtime already in its `init` leaf.
+
 Point any CRI-capable kubelet at the socket (see
 [`examples/kubelet/`](examples/kubelet/)):
 
