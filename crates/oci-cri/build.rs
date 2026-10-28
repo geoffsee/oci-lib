@@ -13,6 +13,7 @@ fn main() {
 
 fn run() -> Result<(), String> {
     println!("cargo::rustc-check-cfg=cfg(rok_stub)");
+    println!("cargo::rustc-check-cfg=cfg(rok_vm)");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=shim");
     println!("cargo:rerun-if-changed=native");
@@ -38,7 +39,29 @@ fn run() -> Result<(), String> {
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os != "linux" {
-        // Non-Linux hosts link a stub; the engine runs on Linux only.
+        // The macOS guest is opt-in via the `vm` feature (default). Without it
+        // macOS links the stub. Embedding only works on a macOS build host.
+        #[cfg(all(feature = "vm", target_os = "macos"))]
+        if target_os == "macos" {
+            let embed = oci_util::vm::EmbedConfig {
+                package: None,
+                kernel_env: "ROK_GUEST_KERNEL",
+                initrd_env: "ROK_GUEST_INITRD",
+                cache_env: "ROK_GUEST_CACHE",
+                out_kernel_name: "rok-guest-vmlinuz.zst",
+                out_initrd_name: "rok-guest-initramfs.zst",
+                out_attestation_name: "rok-guest-attestation.json",
+                protocol_version: 2,
+            };
+            oci_util::vm::embed_guest(&embed, &manifest, &out_dir)?;
+            println!("cargo:rustc-cfg=rok_vm");
+        }
+        #[cfg(all(feature = "vm", not(target_os = "macos")))]
+        if target_os == "macos" {
+            println!(
+                "cargo:warning=the macOS guest can only be embedded on a macOS host; linking the stub"
+            );
+        }
         compile_stub();
         return Ok(());
     }
@@ -73,10 +96,12 @@ fn codegen() -> Result<(), String> {
 fn compile_stub() {
     let mut build = cc::Build::new();
     build.file("native/stub.c").include("shim/include");
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
+        && env::var_os("CARGO_FEATURE_VM").is_none()
+    {
         build.define(
             "ROK_STUB_DETAIL",
-            "\"oci-cri links the engine only on Linux. Product binaries may proxy via a Linux guest on macOS.\"",
+            "\"This build has the `vm` feature off. macOS runs the engine in a Linux VM; rebuild with default features or `--features vm`.\"",
         );
     }
     build.compile("rokshim");

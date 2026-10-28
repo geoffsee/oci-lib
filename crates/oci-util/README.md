@@ -23,12 +23,12 @@ Std-only guest attestation parse/check and the build-script helper
 
 ## Feature: `vm`
 
-macOS Virtualization host glue shared by `oci-builder` and `oci-runner`:
+macOS Virtualization host glue shared by `oci-builder`, `oci-runner`, and
+`oci-cri`:
 
 - entitlement self-sign (`ensure_entitlement`)
 - virtiofs share planning (`Export`, `plan_shares`, `export_rootfs`)
-- guest image materialize and VZ boot/vsock (`start_vm`, `GuestConfig`)
+- guest image materialize and VZ boot/vsock (`boot_vm`, `start_vm`,
+  `connect_guest_vsock`, `GuestConfig`)
 
-Product crates keep their own Go shims and wire protocols. A future
-`oci-cri` macOS guest should depend on this module instead of copying
-Virtualization code again; engines stay separate.
+Product crates keep their own Go shims and wire protocols.

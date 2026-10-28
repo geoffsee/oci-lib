@@ -36,8 +36,8 @@ pub use entitlement::{
 pub use error::{VmError, VmErrorKind};
 #[cfg(all(feature = "vm", target_os = "macos"))]
 pub use host::{
-    StartedVm, materialize_embedded, start_vm, stop_virtual_machine, virtualization_supported,
-    wait_readable,
+    BootedVm, StartedVm, boot_vm, connect_guest_vsock, materialize_embedded, start_vm,
+    stop_virtual_machine, virtualization_supported, wait_readable,
 };
 #[cfg(all(feature = "vm", target_os = "macos"))]
 pub use shares::{
