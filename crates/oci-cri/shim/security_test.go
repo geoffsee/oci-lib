@@ -7,9 +7,23 @@ import (
 	"path/filepath"
 	"testing"
 
+	runtimeAppArmor "github.com/opencontainers/runc/libcontainer/apparmor"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"go.podman.io/common/pkg/seccomp"
 )
+
+func TestUnconfinedAppArmorDoesNotRequireKernelSupport(t *testing.T) {
+	spec := &specs.Spec{Process: &specs.Process{ApparmorProfile: "unconfined"}, Linux: &specs.Linux{}}
+	if err := applySecurity(spec); err != nil {
+		t.Fatal(err)
+	}
+	if !runtimeAppArmor.IsEnabled() && spec.Process.ApparmorProfile != "" {
+		t.Fatal("disabled kernel cannot apply a profile transition")
+	}
+	if runtimeAppArmor.IsEnabled() && spec.Process.ApparmorProfile != "unconfined" {
+		t.Fatal("enabled kernel must honor the unconfined transition")
+	}
+}
 
 func TestSecurityProfilesFailClosed(t *testing.T) {
 	spec := &specs.Spec{Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{}}, Linux: &specs.Linux{}, Annotations: map[string]string{"io.oci-cri.seccomp": "runtime/default"}}

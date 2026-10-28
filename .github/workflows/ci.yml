@@ -175,6 +175,7 @@ jobs:
             ${{ runner.temp }}/cri-native/*.xml
             ${{ runner.temp }}/cri-native/*.json
             ${{ runner.temp }}/cri-native/seccomp
+            ${{ runner.temp }}/cri-native/apparmor
             ${{ runner.temp }}/cri-native/coredns
             ${{ runner.temp }}/cri-native/threaded
 

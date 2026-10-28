@@ -122,8 +122,11 @@ containers follow Kubernetes semantics and ignore seccomp and AppArmor profiles.
 
 The native [seccomp regression](../../scripts/repro-seccomp.sh) denies a syscall
 in both init and exec, checks unconfined/privileged controls and RuntimeDefault,
-and rejects invalid profiles. AppArmor requires host kernel support and
-`apparmor_parser`; requested profiles fail explicitly when unavailable.
+and rejects invalid profiles. The [AppArmor regression](../../scripts/repro-apparmor.sh)
+checks denied writes in init and exec, with unconfined and privileged controls.
+AppArmor requires host kernel support and `apparmor_parser`; requested profiles
+fail explicitly when unavailable. The resolved profile is passed to each
+libcontainer process because its OCI configuration converter omits that field.
 
 ## macOS
 
