@@ -76,3 +76,11 @@ and this crate's `cri_lifecycle` / `streaming_exec` tests.
 | OpenShift | Needs extra SELinux/SCC work beyond this crate today |
 
 Supply CNI plugins and a pause image on disk before the first pod.
+
+## macOS
+
+Non-Linux hosts link the engine stub (`ErrorCode::Unsupported`). A future
+macOS guest path should reuse [`oci_util::vm`](../oci-util) (entitlement,
+virtiofs shares, Virtualization boot/vsock) the same way `oci-runner` and
+`oci-builder` do — not reimplement Apple Virtualization. The CRI/Go engine
+stays separate from those products' shims.

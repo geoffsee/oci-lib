@@ -23,8 +23,9 @@ A Rust monorepo for daemonless OCI image building and container execution.
 signature helpers and (behind the `vm` / `guest-embed` features) the macOS
 guest packaging shared by builder and runner — entitlement self-sign,
 attestation check, virtiofs shares, and Virtualization boot/vsock. Product
-crates keep separate Go engines. `oci-util` is an internal workspace crate
-and is not published on its own.
+crates keep separate Go engines. `oci-cri` is Linux-engine + stub on macOS
+today; a future CRI guest should consume `oci_util::vm` rather than copy it.
+`oci-util` is an internal workspace crate and is not published on its own.
 
 The builder and runner share a unified architectural pattern:
 - **Zero Daemons**: Everything executes synchronously in-process.
