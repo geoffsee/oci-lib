@@ -23,7 +23,9 @@ extern "C" {
  * registered in the shim until "wait" returns.
  *
  * The input callback fills buf with stdin bytes and returns the count, 0
- * for EOF, or a negative value on error. It may block.
+ * for EOF, or a negative value on error. It may block. Interactive exec emits
+ * ROK_CANCEL_STDIN when the process ends; callers must unblock their input
+ * callback on that control message. The shim joins callbacks before returning.
  *
  * Integer error codes are also process exit codes. 0 is success.
  */
@@ -36,7 +38,9 @@ extern "C" {
 #define ROK_ERR_UNSUPPORTED 8
 #define ROK_ERR_INTERNAL 9
 #define ROK_ERR_STATE 10
+#define ROK_ERR_TIMEOUT 11
 
+#define ROK_CANCEL_STDIN 0
 #define ROK_STDOUT 1
 #define ROK_STDERR 2
 

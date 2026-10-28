@@ -29,6 +29,7 @@ use crate::store::{
     SandboxState, Store, new_id, now_ns,
 };
 use crate::streaming::{SessionKind, StreamingState};
+use prost::Message;
 
 type BoxStream<T> =
     Pin<Box<dyn tonic::codegen::tokio_stream::Stream<Item = Result<T, Status>> + Send>>;
@@ -148,6 +149,7 @@ impl Inner {
                     };
                     if state.exit_code >= 0 {
                         record.exit_code = state.exit_code;
+                        record.reason = exit_reason(state.exit_code, state.oom_killed).into();
                     }
                     if record.finished_at_ns == 0 && record.state == StoredState::Exited {
                         record.finished_at_ns = now_ns();
@@ -163,11 +165,7 @@ impl Inner {
         let images = self.engine.list_images("")?;
         images
             .into_iter()
-            .find(|img| {
-                img.id == requested
-                    || img.repo_tags.iter().any(|t| t == requested)
-                    || img.repo_digests.iter().any(|d| d == requested)
-            })
+            .find(|img| img.matches_reference(requested))
             .ok_or_else(|| {
                 Error::new(
                     ErrorCode::NotFound,
@@ -194,11 +192,20 @@ impl Inner {
             return Ok(NamespacePaths::default());
         }
         let base = format!("/proc/{}/ns", state.pid);
+        let path = |name: &str| {
+            Some(
+                state
+                    .namespaces
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| format!("{base}/{name}")),
+            )
+        };
         Ok(NamespacePaths {
-            network: (!sandbox.host_network).then(|| format!("{base}/net")),
-            ipc: Some(format!("{base}/ipc")),
-            uts: Some(format!("{base}/uts")),
-            pid: Some(format!("{base}/pid")),
+            network: path("net"),
+            ipc: path("ipc"),
+            uts: path("uts"),
+            pid: path("pid"),
             user: None,
         })
     }
@@ -215,11 +222,10 @@ impl Inner {
                     record.state = StoredState::Exited;
                     record.exit_code = code;
                     record.finished_at_ns = now_ns();
-                    record.reason = if code == 0 {
-                        "Completed".into()
-                    } else {
-                        "Error".into()
-                    };
+                    let oom = inner_engine
+                        .container_state(&container_id)
+                        .is_ok_and(|s| s.oom_killed);
+                    record.reason = exit_reason(code, oom).into();
                     let _ = store.put_container(record);
                 }
                 let _ = inner.send(ContainerEventResponse {
@@ -231,6 +237,16 @@ impl Inner {
                 });
             })
             .ok();
+    }
+}
+
+fn exit_reason(code: i32, oom_killed: bool) -> &'static str {
+    if code == 137 && oom_killed {
+        "OOMKilled"
+    } else if code == 0 {
+        "Completed"
+    } else {
+        "Error"
     }
 }
 
@@ -290,6 +306,7 @@ fn container_metadata(record: &ContainerRecord) -> ContainerMetadata {
 }
 
 fn container_status(record: &ContainerRecord) -> ContainerStatus {
+    let config = ContainerConfig::decode(record.config_bytes.as_slice()).unwrap_or_default();
     ContainerStatus {
         id: record.id.clone(),
         metadata: Some(container_metadata(record)),
@@ -315,11 +332,25 @@ fn container_status(record: &ContainerRecord) -> ContainerStatus {
         message: record.message.clone(),
         labels: hashmap(&record.labels),
         annotations: hashmap(&record.annotations),
-        mounts: Vec::new(),
+        mounts: config.mounts,
         log_path: record.log_path.clone(),
         resources: None,
         image_id: String::new(),
-        user: None,
+        user: serde_json::from_str::<serde_json::Value>(&record.spec_json)
+            .ok()
+            .and_then(|spec| {
+                serde_json::from_value::<crate::engine::ResolvedUser>(
+                    spec["process"]["user"].clone(),
+                )
+                .ok()
+            })
+            .map(|user| ContainerUser {
+                linux: Some(LinuxContainerUser {
+                    uid: i64::from(user.uid),
+                    gid: i64::from(user.gid),
+                    supplemental_groups: user.additional_gids.into_iter().map(i64::from).collect(),
+                }),
+            }),
         stop_signal: signal_number(&record.stop_signal),
     }
 }
@@ -651,21 +682,13 @@ impl RuntimeService for CriService {
     ) -> std::result::Result<Response<ExecSyncResponse>, Status> {
         let inner = Arc::clone(&self.inner);
         let request = request.into_inner();
-        let timeout = request.timeout;
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let result = inner
+        let output = tokio::task::spawn_blocking(move || {
+            inner
                 .engine
-                .exec_sync(&request.container_id, &request.cmd, timeout);
-            let _ = tx.send(result);
-        });
-        let output = if timeout > 0 {
-            rx.recv_timeout(Duration::from_secs(timeout as u64))
-                .map_err(|_| Status::deadline_exceeded("exec timed out"))?
-        } else {
-            rx.recv()
-                .map_err(|_| Status::internal("exec thread dropped"))?
-        }
+                .exec_sync(&request.container_id, &request.cmd, request.timeout)
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
         .map_err(Status::from)?;
         Ok(Response::new(ExecSyncResponse {
             stdout: output.stdout,
@@ -690,6 +713,8 @@ impl RuntimeService for CriService {
                 cmd: request.cmd,
                 tty: request.tty,
                 stdin: request.stdin,
+                stdout: request.stdout,
+                stderr: request.stderr,
             },
         );
         Ok(Response::new(ExecResponse { url }))
@@ -700,7 +725,7 @@ impl RuntimeService for CriService {
         request: Request<AttachRequest>,
     ) -> std::result::Result<Response<AttachResponse>, Status> {
         let request = request.into_inner();
-        let _ = self
+        let record = self
             .inner
             .container_record(&request.container_id)
             .map_err(Status::from)?;
@@ -709,7 +734,10 @@ impl RuntimeService for CriService {
             SessionKind::Attach {
                 container_id: request.container_id,
                 stdin: request.stdin,
+                stdin_once: record.stdin_once,
                 tty: request.tty,
+                stdout: request.stdout,
+                stderr: request.stderr,
             },
         );
         Ok(Response::new(AttachResponse { url }))
@@ -917,7 +945,7 @@ impl RuntimeService for CriService {
                 name: String::new(),
                 features: Some(RuntimeHandlerFeatures {
                     recursive_read_only_mounts: true,
-                    user_namespaces: true,
+                    user_namespaces: false,
                 }),
             }],
             features: Some(RuntimeFeatures {
@@ -1132,6 +1160,38 @@ fn stats_container_matches(
     labels_match(&record.labels, &filter.label_selector)
 }
 
+fn sandbox_hostname(config: &PodSandboxConfig) -> CrateResult<String> {
+    if config.hostname.contains('\0') || config.hostname.len() > 64 {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "hostname must be at most 64 bytes and contain no NUL",
+            "",
+        ));
+    }
+    if !config.hostname.is_empty() {
+        return Ok(config.hostname.clone());
+    }
+    // CRI metadata names are not hostnames and may exceed Linux's UTS limit.
+    let name = config
+        .metadata
+        .as_ref()
+        .map(|m| m.name.as_str())
+        .unwrap_or_default();
+    let mut end = name.len().min(64);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    let hostname = &name[..end];
+    if hostname.contains('\0') {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "sandbox name contains NUL",
+            "",
+        ));
+    }
+    Ok(hostname.to_string())
+}
+
 pub(crate) fn run_pod_sandbox_sync(
     inner: &Inner,
     request: RunPodSandboxRequest,
@@ -1139,6 +1199,7 @@ pub(crate) fn run_pod_sandbox_sync(
     let config = request
         .config
         .ok_or_else(|| Error::new(ErrorCode::InvalidArgument, "sandbox config is missing", ""))?;
+    let hostname = sandbox_hostname(&config)?;
     let metadata = config.metadata.clone().unwrap_or_default();
     let sandbox_id = new_id();
     let infra_id = new_id();
@@ -1146,11 +1207,6 @@ pub(crate) fn run_pod_sandbox_sync(
     let rootfs = inner.engine.prepare_rootfs(&infra_id, &image.id)?;
     let mut resolver =
         crate::dns::Resolver::create(&inner.config.root, &sandbox_id, config.dns_config.as_ref())?;
-    let hostname = if config.hostname.is_empty() {
-        metadata.name.clone()
-    } else {
-        config.hostname.clone()
-    };
     let spec = convert::sandbox_spec(
         &config,
         &rootfs.to_string_lossy(),
@@ -1198,7 +1254,13 @@ pub(crate) fn run_pod_sandbox_sync(
     if !host_network && network::configured(&inner.config) {
         let state = inner.engine.container_state(&infra_id)?;
         if state.pid > 0 {
-            let netns = PathBuf::from(format!("/proc/{}/ns/net", state.pid));
+            let netns = PathBuf::from(
+                state
+                    .namespaces
+                    .get("net")
+                    .cloned()
+                    .unwrap_or_else(|| format!("/proc/{}/ns/net", state.pid)),
+            );
             match network::setup(&inner.config, &sandbox_id, &netns, &config.port_mappings) {
                 Ok(result) => {
                     let mut ips = result.ips.into_iter();
@@ -1208,6 +1270,7 @@ pub(crate) fn run_pod_sandbox_sync(
                     }
                 }
                 Err(err) => {
+                    network::teardown(&inner.config, &sandbox_id, &netns);
                     let _ = inner.engine.signal_container(&infra_id, 9);
                     let _ = inner.engine.remove_container(&infra_id);
                     let _ = inner.engine.release_rootfs(&infra_id);
@@ -1243,7 +1306,15 @@ pub(crate) fn stop_pod_sandbox_sync(inner: &Inner, id: &str) -> CrateResult<()> 
             .container_state(&record.infra_container_id)
             .ok()
             .filter(|state| state.pid > 0 && state.status != "stopped")
-            .map(|state| PathBuf::from(format!("/proc/{}/ns/net", state.pid)))
+            .map(|state| {
+                PathBuf::from(
+                    state
+                        .namespaces
+                        .get("net")
+                        .cloned()
+                        .unwrap_or_else(|| format!("/proc/{}/ns/net", state.pid)),
+                )
+            })
             .unwrap_or_default();
         network::teardown(&inner.config, id, &netns);
     }
@@ -1287,48 +1358,73 @@ pub(crate) fn create_container_sync(
     let image = inner.find_image(&image_spec.image)?;
     let id = new_id();
     let rootfs = inner.engine.prepare_rootfs(&id, &image.id)?;
-    let mut namespace_paths = inner.namespace_paths(&sandbox)?;
-    if sandbox.host_network {
-        namespace_paths.network = None;
-    }
-    // Per-container namespace modes: NODE means host namespace (no join).
-    if let Some(security) = config
-        .linux
-        .as_ref()
-        .and_then(|l| l.security_context.as_ref())
-    {
-        if let Some(options) = &security.namespace_options {
-            if options.network == NamespaceMode::Node as i32 {
-                namespace_paths.network = None;
-            }
-            if options.ipc == NamespaceMode::Node as i32 {
-                namespace_paths.ipc = None;
-            }
-            if options.pid == NamespaceMode::Node as i32 {
-                namespace_paths.pid = None;
+    let spec_json = (|| -> CrateResult<String> {
+        let mut namespace_paths = inner.namespace_paths(&sandbox)?;
+        // Per-container namespace modes: NODE means host namespace (no join).
+        if let Some(security) = config
+            .linux
+            .as_ref()
+            .and_then(|l| l.security_context.as_ref())
+        {
+            if let Some(options) = &security.namespace_options {
+                if options.network == NamespaceMode::Node as i32 {
+                    namespace_paths.network = None;
+                }
+                if options.ipc == NamespaceMode::Node as i32 {
+                    namespace_paths.ipc = None;
+                }
+                if options.pid == NamespaceMode::Node as i32 {
+                    namespace_paths.pid = None;
+                }
             }
         }
-    }
-    let hostname = {
-        let state = inner.engine.container_state(&sandbox.infra_container_id)?;
-        let _ = state;
-        sandbox.metadata.name.clone()
+        let hostname = sandbox.metadata.name.clone();
+        let spec_json = convert::container_spec(
+            &config,
+            &rootfs.to_string_lossy(),
+            image.spec.as_ref(),
+            &namespace_paths,
+            &hostname,
+        )?;
+        let (selected, strict) = convert::user_selection(&config, image.spec.as_ref())?;
+        let groups: Vec<u32> = config
+            .linux
+            .as_ref()
+            .and_then(|l| l.security_context.as_ref())
+            .map(|s| s.supplemental_groups.iter().map(|g| *g as u32).collect())
+            .unwrap_or_default();
+        let user =
+            inner
+                .engine
+                .resolve_user(&rootfs.to_string_lossy(), &selected, &groups, strict)?;
+        let mut spec: serde_json::Value = serde_json::from_str(&spec_json)
+            .map_err(|e| Error::new(ErrorCode::Internal, e.to_string(), ""))?;
+        spec["process"]["user"] = serde_json::to_value(user)
+            .map_err(|e| Error::new(ErrorCode::Internal, e.to_string(), ""))?;
+        crate::dns::mount(spec.to_string(), &inner.config.root, &sandbox.id)
+    })();
+    let spec_json = match spec_json {
+        Ok(spec) => spec,
+        Err(err) => {
+            let _ = inner.engine.release_rootfs(&id);
+            return Err(err);
+        }
     };
-    let spec_json = convert::container_spec(
-        &config,
-        &rootfs.to_string_lossy(),
-        image.spec.as_ref(),
-        &namespace_paths,
-        &hostname,
-    )?;
-    let spec_json = crate::dns::mount(spec_json, &inner.config.root, &sandbox.id)?;
+
     if let Err(err) = inner.engine.create_container(&id, &spec_json) {
         let _ = inner.engine.release_rootfs(&id);
         return Err(err);
     }
     let metadata = config.metadata.clone().unwrap_or_default();
     let log_path = if config.log_path.is_empty() {
-        String::new()
+        // Attach still needs output when CRI clients omit a kubelet log path.
+        inner
+            .config
+            .root
+            .join("logs")
+            .join(format!("{id}.log"))
+            .to_string_lossy()
+            .into_owned()
     } else {
         format!(
             "{}/{}",
@@ -1373,6 +1469,7 @@ pub(crate) fn create_container_sync(
         reason: String::new(),
         message: String::new(),
         spec_json,
+        config_bytes: config.encode_to_vec(),
         rootfs: rootfs.to_string_lossy().into_owned(),
         stop_signal: image
             .spec
@@ -1418,7 +1515,11 @@ pub(crate) fn start_container_sync(inner: &Inner, id: &str) -> CrateResult<()> {
 }
 
 pub(crate) fn stop_container_sync(inner: &Inner, id: &str, timeout_secs: i64) -> CrateResult<()> {
-    let record = inner.container_record(id)?;
+    let record = match inner.container_record(id) {
+        Ok(record) => record,
+        Err(err) if err.code() == ErrorCode::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
     if record.state != StoredState::Running {
         return Ok(()); // idempotent
     }
@@ -1461,7 +1562,7 @@ pub(crate) fn stop_container_sync(inner: &Inner, id: &str, timeout_secs: i64) ->
                     record.state = StoredState::Exited;
                     record.exit_code = state.exit_code;
                     record.finished_at_ns = now_ns();
-                    record.reason = "Completed".into();
+                    record.reason = exit_reason(record.exit_code, state.oom_killed).into();
                     let _ = inner.store.put_container(record);
                 }
             }
@@ -1488,6 +1589,11 @@ pub(crate) fn remove_container_sync(inner: &Inner, id: &str) -> CrateResult<()> 
         .unwrap_or_else(|p| p.into_inner())
         .remove(id);
     inner.store.remove_container(id)?;
+    // Only remove runtime-owned fallback logs; kubelet owns explicit log paths.
+    let fallback_log = inner.config.root.join("logs").join(format!("{id}.log"));
+    if std::path::Path::new(&record.log_path) == fallback_log {
+        let _ = std::fs::remove_file(fallback_log);
+    }
     inner.emit(id, ContainerEventType::ContainerDeletedEvent);
     Ok(())
 }
@@ -1691,6 +1797,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sandbox_hostname_is_bounded_without_changing_explicit_names() {
+        let config = PodSandboxConfig {
+            metadata: Some(PodSandboxMetadata {
+                name: format!("create-PodSandbox-for-container-{}", "a".repeat(36)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(sandbox_hostname(&config).unwrap().len(), 64);
+        let explicit = PodSandboxConfig {
+            hostname: "custom-host".into(),
+            ..config.clone()
+        };
+        assert_eq!(sandbox_hostname(&explicit).unwrap(), "custom-host");
+        let invalid = PodSandboxConfig {
+            hostname: "a".repeat(65),
+            ..config
+        };
+        assert!(sandbox_hostname(&invalid).is_err());
+    }
+
+    #[test]
+    fn exit_reason_distinguishes_oom_from_explicit_sigkill() {
+        assert_eq!(exit_reason(137, true), "OOMKilled");
+        assert_eq!(exit_reason(137, false), "Error");
+        assert_eq!(exit_reason(0, true), "Completed");
+    }
+
+    #[test]
+    fn status_preserves_requested_mounts() {
+        let mut record = container("c", "s", StoredState::Created, None);
+        let config = ContainerConfig {
+            mounts: vec![Mount {
+                host_path: "/host".into(),
+                container_path: "/data".into(),
+                propagation: MountPropagation::PropagationBidirectional as i32,
+                readonly: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        record.config_bytes = config.encode_to_vec();
+        let restored: ContainerRecord =
+            serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
+        assert_eq!(container_status(&restored).mounts, config.mounts);
+    }
+
+    #[test]
     fn signal_names_map_to_numbers() {
         assert_eq!(signal_number("SIGTERM"), 15);
         assert_eq!(signal_number("SIGKILL"), 9);
@@ -1770,6 +1924,7 @@ mod tests {
             reason: String::new(),
             message: String::new(),
             spec_json: String::new(),
+            config_bytes: Vec::new(),
             rootfs: String::new(),
             stop_signal: String::new(),
         }

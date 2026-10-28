@@ -118,32 +118,25 @@ func opPullImage(req *opRequest) (any, error) {
 	if err != nil {
 		return nil, fail(codeRun, "pull image", err.Error())
 	}
-	imageRef := req.Image
-	if len(pulled) > 0 {
-		digests := pulled[0].Digests()
-		if len(digests) > 0 {
-			imageRef = pulled[0].Names()[0] + "@" + digests[0].String()
-			if names := pulled[0].Names(); len(names) == 0 {
-				imageRef = digests[0].String()
-			}
-		}
+	if len(pulled) == 0 {
+		return nil, fail(codeRun, "pull returned no image", req.Image)
 	}
-	return map[string]any{"image_ref": imageRef}, nil
+	// Tags of the same stored image must return the same CRI image identity.
+	return map[string]any{"image_ref": pulled[0].ID()}, nil
 }
 
-func convertImage(img *libimage.Image) map[string]any {
-	size, _ := img.Size()
-	tags := img.Names()
-	digests := []string{}
-	for _, d := range img.Digests() {
-		digests = append(digests, d.String())
+func convertImage(img *libimage.Image) (map[string]any, error) {
+	size, err := img.Size()
+	if err != nil {
+		return nil, err
 	}
-	// RepoTags are names with tags; RepoDigests pair names with digests.
-	repoDigests := []string{}
-	for _, name := range tags {
-		for _, d := range img.Digests() {
-			repoDigests = append(repoDigests, name+"@"+d.String())
-		}
+	tags, err := img.RepoTags()
+	if err != nil {
+		return nil, err
+	}
+	repoDigests, err := img.RepoDigests()
+	if err != nil {
+		return nil, err
 	}
 	out := map[string]any{
 		"id":           img.ID(),
@@ -182,7 +175,7 @@ func convertImage(img *libimage.Image) map[string]any {
 			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 func opListImages(req *opRequest) (any, error) {
@@ -196,7 +189,10 @@ func opListImages(req *opRequest) (any, error) {
 	}
 	list := []map[string]any{}
 	for _, img := range images {
-		converted := convertImage(img)
+		converted, err := convertImage(img)
+		if err != nil {
+			return nil, fail(codeRun, "image metadata", err.Error())
+		}
 		if req.Filter != "" {
 			id, _ := converted["id"].(string)
 			matched := id == req.Filter

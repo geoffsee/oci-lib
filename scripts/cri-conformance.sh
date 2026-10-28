@@ -56,10 +56,5 @@ echo "crictl lifecycle smoke OK"
 echo "== critest CRI validation suite =="
 # --ginkgo.focus can be narrowed via extra args, e.g.:
 #   scripts/cri-conformance.sh /run/oci-cri/oci-cri.sock --ginkgo.focus "runtime should"
-critest --runtime-endpoint "$ENDPOINT" \
-        --image-endpoint "$ENDPOINT" \
-        --test-images-file "" \
-        --parallel 2 \
-        "$@" 2>/dev/null || \
 critest --runtime-endpoint "$ENDPOINT" --image-endpoint "$ENDPOINT" "$@"
 echo "CRI conformance OK"

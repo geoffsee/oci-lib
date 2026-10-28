@@ -78,12 +78,28 @@ because outstanding RPCs may take time to drain.
 
 ## Surface
 
-Full CRI v1: pod/container lifecycle, Exec/Attach/PortForward streaming,
+CRI v1 services: pod/container lifecycle, Exec/Attach/PortForward streaming,
 CRI logs, stats, ImageService (pull/list/status/remove/`ImageFsInfo`), and
 CNI networking via `--cni-bin-dir` / `--cni-conf-dir`.
 
-Conformance: [`scripts/cri-conformance.sh`](../../scripts/cri-conformance.sh)
-and this crate's `cri_lifecycle` / `streaming_exec` tests.
+Streaming accepts Kubernetes SPDY/3.1 and WebSocket upgrades with single-use
+session tokens. Exec timeouts kill and reap the command before returning.
+User namespaces remain unsupported and are advertised as such; requests for
+mapped user namespaces fail explicitly. Terminal streams currently use pipes;
+PTY allocation and terminal resizing remain incomplete.
+
+Run the native regression and full upstream cri-tools suite in a disposable
+Linux container with [`scripts/native-cri-conformance.sh`](../../scripts/native-cri-conformance.sh):
+
+```sh
+scripts/native-cri-conformance.sh target/debug/oci-cri /tmp/cri-native-evidence
+```
+
+Set `CONTAINER_ENGINE=podman` to use Podman. This fixture supplies CNI, shares
+the required namespaces with its test client, preserves logs/JUnit results,
+and returns a failure if any regression or conformance test fails. Tests for
+unsupported optional features or unavailable host security modules may skip.
+`cri_lifecycle` / `streaming_exec` exercise the protocol with a fake engine.
 
 ## Distro notes
 
@@ -96,11 +112,18 @@ and this crate's `cri_lifecycle` / `streaming_exec` tests.
 
 Supply CNI plugins and a pause image on disk before the first pod.
 
-Seccomp profile enforcement is not implemented. Requests for `RuntimeDefault`,
-`Localhost`, or a legacy confined profile are rejected as unsupported; they are
-never silently downgraded to unconfined. Explicit `Unconfined` and unspecified
-profiles retain the existing behavior. Enabling the build's libseccomp feature
-alone does not implement CRI profile translation.
+Seccomp `RuntimeDefault` uses the maintained containers-common profile.
+`Localhost` accepts an absolute node path to a valid seccomp JSON profile;
+legacy `runtime/default`, `docker/default`, and `localhost/<absolute-path>`
+selections are supported. Filters apply to both init and exec. Missing or
+malformed profiles, and confined requests on builds without libseccomp, fail
+explicitly. Unspecified and `Unconfined` profiles add no filter. Privileged
+containers follow Kubernetes semantics and ignore seccomp and AppArmor profiles.
+
+The native [seccomp regression](../../scripts/repro-seccomp.sh) denies a syscall
+in both init and exec, checks unconfined/privileged controls and RuntimeDefault,
+and rejects invalid profiles. AppArmor requires host kernel support and
+`apparmor_parser`; requested profiles fail explicitly when unavailable.
 
 ## macOS
 

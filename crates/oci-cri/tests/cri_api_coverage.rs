@@ -35,6 +35,13 @@ async fn status_version_and_runtime_config() {
         .await
         .expect("status")
         .into_inner();
+    assert!(
+        !status.runtime_handlers[0]
+            .features
+            .as_ref()
+            .unwrap()
+            .user_namespaces
+    );
     let conditions = &status.status.as_ref().unwrap().conditions;
     assert!(
         conditions
@@ -532,4 +539,18 @@ async fn multi_container_stats_resources_logs_and_teardown() {
         .expect("list after sandbox remove")
         .into_inner();
     assert!(containers.containers.iter().all(|c| c.id != a && c.id != b));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_missing_container_is_idempotent() {
+    let mut h = Harness::start().await;
+    for timeout in [0, 5] {
+        h.runtime
+            .stop_container(StopContainerRequest {
+                container_id: "absent".into(),
+                timeout,
+            })
+            .await
+            .expect("missing container is already stopped");
+    }
 }

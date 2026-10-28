@@ -37,14 +37,20 @@ pub fn sandbox_spec(
     image: Option<&ImageSpec>,
     hostname: &str,
 ) -> Result<String> {
-    if let Some(security) = config
+    let security = config
         .linux
         .as_ref()
-        .and_then(|linux| linux.security_context.as_ref())
-    {
-        #[allow(deprecated)]
-        validate_seccomp(security.seccomp.as_ref(), &security.seccomp_profile_path)?;
-    }
+        .and_then(|linux| linux.security_context.as_ref());
+    validate_user_namespace(security.and_then(|s| s.namespace_options.as_ref()))?;
+    #[allow(deprecated)]
+    let annotations = security_annotations(
+        &config.annotations,
+        security.and_then(|s| s.seccomp.as_ref()),
+        security
+            .map(|s| s.seccomp_profile_path.as_str())
+            .unwrap_or_default(),
+        false,
+    )?;
     let host_network = config
         .linux
         .as_ref()
@@ -56,10 +62,16 @@ pub fn sandbox_spec(
     if !host_network {
         namespaces.push(json!({"type": "network"}));
     }
-    namespaces.push(json!({"type": "ipc"}));
+    let options = security.and_then(|s| s.namespace_options.as_ref());
+    if !options.is_some_and(|ns| ns.ipc == NamespaceMode::Node as i32) {
+        namespaces.push(json!({"type": "ipc"}));
+    }
+    if !options.is_some_and(|ns| ns.pid == NamespaceMode::Node as i32) {
+        namespaces.push(json!({"type": "pid"}));
+    }
     namespaces.push(json!({"type": "uts"}));
     let args = image_args(image, &[], &[]);
-    let spec = json!({
+    let mut spec = json!({
         "ociVersion": "1.0.2-dev",
         "hostname": hostname,
         "process": {
@@ -76,8 +88,12 @@ pub fn sandbox_spec(
             "namespaces": namespaces,
             "sysctl": config.linux.as_ref().map(|l| l.sysctls.clone()).unwrap_or_default(),
         },
-        "annotations": config.annotations,
+        "annotations": annotations,
     });
+    spec["process"]["apparmorProfile"] = json!(apparmor_reference(
+        security.and_then(|s| s.apparmor.as_ref()),
+        ""
+    )?);
     to_string(spec)
 }
 
@@ -98,10 +114,16 @@ pub fn container_spec(
     }
     let linux = config.linux.as_ref();
     let security = linux.and_then(|l| l.security_context.as_ref());
-    if let Some(security) = security {
-        #[allow(deprecated)]
-        validate_seccomp(security.seccomp.as_ref(), &security.seccomp_profile_path)?;
-    }
+    validate_user_namespace(security.and_then(|s| s.namespace_options.as_ref()))?;
+    #[allow(deprecated)]
+    let annotations = security_annotations(
+        &config.annotations,
+        security.and_then(|s| s.seccomp.as_ref()),
+        security
+            .map(|s| s.seccomp_profile_path.as_str())
+            .unwrap_or_default(),
+        security.is_some_and(|s| s.privileged),
+    )?;
     let args = image_args(image, &config.command, &config.args);
     if args.is_empty() {
         return Err(Error::new(
@@ -110,9 +132,20 @@ pub fn container_spec(
             "",
         ));
     }
+    let _ = user_selection(config, image)?;
     let (uid, gid, extra_groups) = resolve_user(config, image);
     let mut mounts = default_mounts();
     for mount in &config.mounts {
+        if mount.recursive_read_only
+            && (!mount.readonly
+                || mount.propagation != crate::api::MountPropagation::PropagationPrivate as i32)
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "recursive read-only mounts require readonly and private propagation",
+                "",
+            ));
+        }
         mounts.push(bind_mount(mount));
     }
     if let Some(image) = image {
@@ -161,7 +194,7 @@ pub fn container_spec(
     } else {
         "/".to_string()
     };
-    let spec = json!({
+    let mut spec = json!({
         "ociVersion": "1.0.2-dev",
         "hostname": hostname,
         "process": {
@@ -181,14 +214,29 @@ pub fn container_spec(
         "mounts": mounts,
         "linux": {
             "namespaces": namespace_json,
+            "rootfsPropagation": if config.mounts.iter().any(|m| m.propagation == crate::api::MountPropagation::PropagationBidirectional as i32) { "rshared" } else { "rslave" },
             "resources": resources,
             "devices": devices,
             "maskedPaths": security.map(|s| s.masked_paths.clone()).unwrap_or_default(),
             "readonlyPaths": security.map(|s| s.readonly_paths.clone()).unwrap_or_default(),
             "sysctl": BTreeMap::<String, String>::new(),
         },
-        "annotations": config.annotations,
+        "annotations": annotations,
     });
+    // A joined UTS namespace already has the sandbox's hostname. Setting it
+    // again can overwrite an explicit CRI hostname or exceed the kernel limit.
+    if namespaces.uts.is_some() {
+        spec.as_object_mut().unwrap().remove("hostname");
+    }
+    #[allow(deprecated)]
+    if !security.is_some_and(|s| s.privileged) {
+        spec["process"]["apparmorProfile"] = json!(apparmor_reference(
+            security.and_then(|s| s.apparmor.as_ref()),
+            security
+                .map(|s| s.apparmor_profile.as_str())
+                .unwrap_or_default()
+        )?);
+    }
     to_string(spec)
 }
 
@@ -248,6 +296,10 @@ fn namespace_list(
         if node_mode == NamespaceMode::Node as i32 {
             return; // host namespace: omit entirely
         }
+        if kind == "pid" && node_mode == NamespaceMode::Container as i32 {
+            out.push(json!({"type": kind}));
+            return;
+        }
         match path {
             Some(path) => out.push(json!({"type": kind, "path": path})),
             None => out.push(json!({"type": kind})),
@@ -262,14 +314,17 @@ fn namespace_list(
         &paths.user,
         options
             .and_then(|ns| ns.userns_options.as_ref())
-            .map(|_| NamespaceMode::Pod as i32)
+            .map(|user| user.mode)
             .unwrap_or(NamespaceMode::Node as i32),
     );
     out
 }
 
 fn bind_mount(mount: &crate::api::Mount) -> Value {
-    let mut options = vec!["bind".to_string()];
+    let mut options = vec!["rbind".to_string()];
+    if mount.recursive_read_only {
+        options.push("rro".into());
+    }
     options.push(if mount.readonly {
         "ro".to_string()
     } else {
@@ -449,6 +504,65 @@ fn image_env(image: Option<&ImageSpec>, extra: &[String]) -> Vec<String> {
     out
 }
 
+/// Resolve the requested identity before consulting the image's passwd/group files.
+pub(crate) fn user_selection(
+    config: &ContainerConfig,
+    image: Option<&ImageSpec>,
+) -> Result<(String, bool)> {
+    let security = config
+        .linux
+        .as_ref()
+        .and_then(|l| l.security_context.as_ref());
+    if let Some(s) = security {
+        let valid_id = |n: i64| (0..=u32::MAX as i64).contains(&n);
+        if s.run_as_user.as_ref().is_some_and(|u| !valid_id(u.value))
+            || s.run_as_group.as_ref().is_some_and(|g| !valid_id(g.value))
+            || s.supplemental_groups.iter().any(|g| !valid_id(*g))
+        {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "user and group IDs must fit u32",
+                "",
+            ));
+        }
+        if s.run_as_group.is_some() && s.run_as_user.is_none() && s.run_as_username.is_empty() {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "runAsGroup requires runAsUser or runAsUsername",
+                "",
+            ));
+        }
+        if s.supplemental_groups_policy != 0 && s.supplemental_groups_policy != 1 {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "unknown supplemental groups policy",
+                "",
+            ));
+        }
+    }
+    let name = security
+        .map(|s| s.run_as_username.as_str())
+        .unwrap_or_default();
+    let mut selected = if let Some(uid) = security.and_then(|s| s.run_as_user.as_ref()) {
+        uid.value.to_string()
+    } else if !name.is_empty() {
+        name.to_owned()
+    } else {
+        image.map(|i| i.user.clone()).unwrap_or_default()
+    };
+    if let Some(gid) = security.and_then(|s| s.run_as_group.as_ref()) {
+        selected = format!(
+            "{}:{}",
+            selected.split(':').next().unwrap_or_default(),
+            gid.value
+        );
+    }
+    Ok((
+        selected,
+        security.is_some_and(|s| s.supplemental_groups_policy == 1),
+    ))
+}
+
 fn resolve_user(config: &ContainerConfig, image: Option<&ImageSpec>) -> (u32, u32, Vec<u32>) {
     let security = config
         .linux
@@ -526,6 +640,44 @@ mod tests {
             }),
             ..ContainerConfig::default()
         }
+    }
+
+    #[test]
+    fn container_pid_mode_creates_a_new_namespace_instead_of_joining_the_sandbox() {
+        let paths = NamespacePaths {
+            pid: Some("/proc/123/ns/pid".into()),
+            ..Default::default()
+        };
+        let security = LinuxContainerSecurityContext {
+            namespace_options: Some(crate::api::NamespaceOption {
+                pid: NamespaceMode::Container as i32,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let list = namespace_list(&paths, Some(&security));
+        let pid = list.iter().find(|n| n["type"] == "pid").unwrap();
+        assert!(pid.get("path").is_none());
+    }
+
+    #[test]
+    fn joined_uts_preserves_the_sandbox_hostname() {
+        let paths = NamespacePaths {
+            uts: Some("/proc/123/ns/uts".into()),
+            ..Default::default()
+        };
+        let spec: Value = serde_json::from_str(
+            &container_spec(
+                &config(),
+                "/rootfs",
+                Some(&image()),
+                &paths,
+                &"a".repeat(68),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(spec.get("hostname").is_none());
     }
 
     #[test]
@@ -937,7 +1089,7 @@ mod mount_mapping_regressions {
         });
         assert!(value.get("uidMappings").is_none());
         assert!(value.get("gidMappings").is_none());
-        assert_eq!(value["options"], json!(["bind", "ro", "rprivate"]));
+        assert_eq!(value["options"], json!(["rbind", "ro", "rprivate"]));
     }
 
     #[test]
@@ -960,20 +1112,123 @@ mod mount_mapping_regressions {
     }
 }
 
-// Until profile translation is implemented, never silently run a requested
-// confined workload without its filter. The modern field takes precedence.
-fn validate_seccomp(profile: Option<&crate::api::SecurityProfile>, legacy: &str) -> Result<()> {
-    let unconfined = profile.map_or(legacy.is_empty() || legacy == "unconfined", |profile| {
-        profile.profile_type == crate::api::security_profile::ProfileType::Unconfined as i32
-    });
-    if unconfined {
-        return Ok(());
+const SECCOMP_ANNOTATION: &str = "io.oci-cri.seccomp";
+const PRIVILEGED_ANNOTATION: &str = "io.oci-cri.privileged";
+
+fn security_annotations(
+    source: &std::collections::HashMap<String, String>,
+    profile: Option<&crate::api::SecurityProfile>,
+    legacy: &str,
+    privileged: bool,
+) -> Result<std::collections::HashMap<String, String>> {
+    let mut annotations = source.clone();
+    // CRI annotations must not impersonate runtime-owned security settings.
+    annotations.remove(SECCOMP_ANNOTATION);
+    annotations.remove(PRIVILEGED_ANNOTATION);
+    if privileged {
+        annotations.insert(PRIVILEGED_ANNOTATION.into(), "true".into());
+        return Ok(annotations);
     }
-    Err(Error::new(
-        ErrorCode::Unsupported,
-        "seccomp profile enforcement is not implemented",
-        "requested profile was not applied; refusing to create an unconfined container",
-    ))
+    if let Some(reference) = seccomp_reference(profile, legacy)? {
+        annotations.insert(SECCOMP_ANNOTATION.into(), reference);
+    }
+    Ok(annotations)
+}
+
+fn seccomp_reference(
+    profile: Option<&crate::api::SecurityProfile>,
+    legacy: &str,
+) -> Result<Option<String>> {
+    use crate::api::security_profile::ProfileType;
+    let path = if let Some(profile) = profile {
+        let kind = ProfileType::try_from(profile.profile_type).map_err(|_| {
+            Error::new(
+                ErrorCode::InvalidArgument,
+                "unknown seccomp profile type",
+                "",
+            )
+        })?;
+        if kind != ProfileType::Localhost && !profile.localhost_ref.is_empty() {
+            return Err(Error::new(
+                ErrorCode::InvalidArgument,
+                "localhost_ref requires a Localhost seccomp profile",
+                "",
+            ));
+        }
+        match kind {
+            ProfileType::Unconfined => return Ok(None),
+            ProfileType::RuntimeDefault => return Ok(Some("runtime/default".into())),
+            ProfileType::Localhost => profile.localhost_ref.as_str(),
+        }
+    } else {
+        match legacy {
+            "" | "unconfined" => return Ok(None),
+            "runtime/default" | "docker/default" => return Ok(Some("runtime/default".into())),
+            value => value.strip_prefix("localhost/").unwrap_or(""),
+        }
+    };
+    if !std::path::Path::new(path).is_absolute() || path.contains('\0') {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "Localhost seccomp requires an absolute profile path",
+            "",
+        ));
+    }
+    Ok(Some(path.into()))
+}
+
+fn apparmor_reference(
+    profile: Option<&crate::api::SecurityProfile>,
+    legacy: &str,
+) -> Result<String> {
+    use crate::api::security_profile::ProfileType;
+    let name = if let Some(profile) = profile {
+        match ProfileType::try_from(profile.profile_type) {
+            Ok(ProfileType::RuntimeDefault) => return Ok("runtime/default".into()),
+            Ok(ProfileType::Unconfined) => return Ok("unconfined".into()),
+            Ok(ProfileType::Localhost) => profile.localhost_ref.as_str(),
+            Err(_) => {
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    "unknown AppArmor profile type",
+                    "",
+                ));
+            }
+        }
+    } else {
+        match legacy {
+            "" | "unconfined" => return Ok(legacy.into()),
+            "runtime/default" | "docker/default" => return Ok("runtime/default".into()),
+            name => name.strip_prefix("localhost/").unwrap_or(""),
+        }
+    };
+    if name.is_empty() || name.contains(['\0', '\n']) {
+        return Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "invalid AppArmor profile name",
+            "",
+        ));
+    }
+    Ok(name.into())
+}
+
+fn validate_user_namespace(options: Option<&crate::api::NamespaceOption>) -> Result<()> {
+    let Some(user) = options.and_then(|ns| ns.userns_options.as_ref()) else {
+        return Ok(());
+    };
+    match NamespaceMode::try_from(user.mode) {
+        Ok(NamespaceMode::Node) if user.uids.is_empty() && user.gids.is_empty() => Ok(()),
+        Ok(NamespaceMode::Pod) => Err(Error::new(
+            ErrorCode::Unsupported,
+            "user namespace mappings are not implemented",
+            "requested isolation was not applied",
+        )),
+        _ => Err(Error::new(
+            ErrorCode::InvalidArgument,
+            "invalid user namespace mode or mappings",
+            "",
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -982,31 +1237,192 @@ mod seccomp_regressions {
     use crate::api::{SecurityProfile, security_profile::ProfileType};
 
     #[test]
-    fn requested_seccomp_is_rejected_instead_of_silently_ignored() {
-        for kind in [ProfileType::RuntimeDefault, ProfileType::Localhost] {
-            assert!(
-                validate_seccomp(
-                    Some(&SecurityProfile {
-                        profile_type: kind as i32,
-                        ..Default::default()
-                    }),
-                    ""
-                )
-                .is_err()
+    fn seccomp_profiles_are_translated_and_validated() {
+        assert_eq!(
+            seccomp_reference(Some(&SecurityProfile::default()), "")
+                .unwrap()
+                .as_deref(),
+            Some("runtime/default")
+        );
+        assert_eq!(
+            seccomp_reference(None, "runtime/default")
+                .unwrap()
+                .as_deref(),
+            Some("runtime/default")
+        );
+        assert_eq!(
+            seccomp_reference(None, "localhost//tmp/profile.json")
+                .unwrap()
+                .as_deref(),
+            Some("/tmp/profile.json")
+        );
+        let mut profile = SecurityProfile {
+            profile_type: ProfileType::Localhost as i32,
+            localhost_ref: "relative.json".into(),
+        };
+        assert!(seccomp_reference(Some(&profile), "").is_err());
+        profile.localhost_ref = "/tmp/profile.json".into();
+        assert_eq!(
+            seccomp_reference(Some(&profile), "").unwrap().as_deref(),
+            Some("/tmp/profile.json")
+        );
+        profile.profile_type = ProfileType::Unconfined as i32;
+        profile.localhost_ref.clear();
+        assert!(
+            seccomp_reference(Some(&profile), "runtime/default")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn caller_annotations_cannot_override_security_context() {
+        let input = std::collections::HashMap::from([
+            (PRIVILEGED_ANNOTATION.into(), "true".into()),
+            (SECCOMP_ANNOTATION.into(), "runtime/default".into()),
+        ]);
+        assert!(
+            security_annotations(&input, None, "", false)
+                .unwrap()
+                .is_empty()
+        );
+        let result = security_annotations(&input, None, "localhost/missing", true).unwrap();
+        assert_eq!(result.get(PRIVILEGED_ANNOTATION).unwrap(), "true");
+        assert!(!result.contains_key(SECCOMP_ANNOTATION));
+    }
+
+    #[test]
+    fn unsupported_user_namespaces_are_not_silently_ignored() {
+        let mut ns = crate::api::NamespaceOption {
+            userns_options: Some(crate::api::UserNamespace::default()),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_user_namespace(Some(&ns)).unwrap_err().code(),
+            ErrorCode::Unsupported
+        );
+        ns.userns_options.as_mut().unwrap().mode = NamespaceMode::Node as i32;
+        assert!(validate_user_namespace(Some(&ns)).is_ok());
+        ns.userns_options.as_mut().unwrap().mode = NamespaceMode::Container as i32;
+        assert_eq!(
+            validate_user_namespace(Some(&ns)).unwrap_err().code(),
+            ErrorCode::InvalidArgument
+        );
+    }
+}
+
+#[cfg(test)]
+mod conformance_validation_regressions {
+    use super::*;
+    use crate::api::*;
+
+    fn config() -> ContainerConfig {
+        ContainerConfig {
+            image: Some(crate::api::ImageSpec::default()),
+            command: vec!["/bin/true".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn recursive_readonly_requires_private_readonly_mounts() {
+        let mut config = config();
+        for (readonly, propagation) in [(false, 0), (true, 1), (true, 2)] {
+            config.mounts = vec![Mount {
+                recursive_read_only: true,
+                readonly,
+                propagation,
+                ..Default::default()
+            }];
+            assert_eq!(
+                container_spec(&config, "/rootfs", None, &NamespacePaths::default(), "pod")
+                    .unwrap_err()
+                    .code(),
+                ErrorCode::InvalidArgument
             );
         }
-        assert!(validate_seccomp(None, "runtime/default").is_err());
-        assert!(validate_seccomp(None, "localhost/profile.json").is_err());
-        assert!(validate_seccomp(None, "").is_ok());
+        config.mounts[0].propagation = 0;
+        let spec: Value = serde_json::from_str(
+            &container_spec(&config, "/rootfs", None, &NamespacePaths::default(), "pod").unwrap(),
+        )
+        .unwrap();
         assert!(
-            validate_seccomp(
-                Some(&SecurityProfile {
-                    profile_type: ProfileType::Unconfined as i32,
+            spec["mounts"].as_array().unwrap().last().unwrap()["options"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("rro"))
+        );
+    }
+
+    #[test]
+    fn user_selection_rejects_invalid_ids_and_group_without_user() {
+        let mut config = config();
+        config.linux = Some(LinuxContainerConfig {
+            security_context: Some(LinuxContainerSecurityContext {
+                run_as_group: Some(Int64Value { value: 42 }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert!(user_selection(&config, None).is_err());
+        let security = config
+            .linux
+            .as_mut()
+            .unwrap()
+            .security_context
+            .as_mut()
+            .unwrap();
+        security.run_as_user = Some(Int64Value { value: -1 });
+        assert!(user_selection(&config, None).is_err());
+        config
+            .linux
+            .as_mut()
+            .unwrap()
+            .security_context
+            .as_mut()
+            .unwrap()
+            .run_as_user = Some(Int64Value { value: 1000 });
+        assert_eq!(
+            user_selection(&config, None).unwrap(),
+            ("1000:42".into(), false)
+        );
+    }
+
+    #[test]
+    fn sandbox_host_ipc_and_pid_are_honored() {
+        let config = PodSandboxConfig {
+            linux: Some(LinuxPodSandboxConfig {
+                security_context: Some(LinuxSandboxSecurityContext {
+                    namespace_options: Some(NamespaceOption {
+                        ipc: NamespaceMode::Node as i32,
+                        pid: NamespaceMode::Node as i32,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
-                "runtime/default"
-            )
-            .is_ok()
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let spec: Value =
+            serde_json::from_str(&sandbox_spec(&config, "/rootfs", None, "pod").unwrap()).unwrap();
+        assert!(
+            !spec["linux"]["namespaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|ns| ns["type"] == "ipc" || ns["type"] == "pid")
+        );
+        let spec: Value = serde_json::from_str(
+            &sandbox_spec(&PodSandboxConfig::default(), "/rootfs", None, "pod").unwrap(),
+        )
+        .unwrap();
+        assert!(
+            spec["linux"]["namespaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|ns| ns["type"] == "pid")
         );
     }
 }

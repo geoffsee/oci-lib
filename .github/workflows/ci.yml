@@ -153,46 +153,30 @@ jobs:
           curl -fsSL "https://github.com/kubernetes-sigs/cri-tools/releases/download/${VERSION}/crictl-${VERSION}-linux-amd64.tar.gz" | sudo tar -xz -C /usr/local/bin
           curl -fsSL "https://github.com/kubernetes-sigs/cri-tools/releases/download/${VERSION}/critest-${VERSION}-linux-amd64.tar.gz" | sudo tar -xz -C /usr/local/bin
           crictl --version
-          critest --version || true
+          critest --version
       - name: Build oci-cri
         run: cargo build --locked -p oci-cri
       - name: CRI lifecycle + API coverage + streaming tests (fake engine)
         run: cargo test -p oci-cri --features test-support --locked --test cri_lifecycle --test cri_api_coverage --test streaming_exec
-      - name: Native CoreDNS and failed-start regressions
+      - name: Go shim security, identity, and streaming regressions
+        working-directory: crates/oci-cri/shim
         run: |
-          set -euo pipefail
-          sudo apt-get install -y jq
-          ARTIFACTS="$RUNNER_TEMP/coredns-regression"
-          mkdir -p "$ARTIFACTS"
-          trap 'docker logs oci-cri-regression > "$ARTIFACTS/runtime.log" 2>&1; sudo dmesg > "$ARTIFACTS/kernel.log" 2>&1 || true; docker rm -f oci-cri-regression' EXIT
-          # Install a real file: runc's sealed overlay clone of the parent
-          # directory cannot see an executable supplied by a single-file bind.
-          docker create --name oci-cri-regression --privileged --cgroupns private \
-            -v "$ARTIFACTS:$ARTIFACTS" ubuntu:24.04 sh -ec \
-            'apt-get update -qq; apt-get install -y -qq libseccomp2 ca-certificates; exec oci-cri serve --socket "$1/cri.sock"' sh "$ARTIFACTS"
-          docker cp target/debug/oci-cri oci-cri-regression:/usr/local/bin/oci-cri
-          docker start oci-cri-regression
-          for _ in $(seq 1 120); do [ -S "$ARTIFACTS/cri.sock" ] && break; sleep 1; done
-          test -S "$ARTIFACTS/cri.sock"
-          sudo scripts/repro-coredns-start.sh "$ARTIFACTS/cri.sock" "$ARTIFACTS/results"
-          sudo scripts/repro-threaded-init.sh "$ARTIFACTS/cri.sock" "$ARTIFACTS/threaded-init"
-      - name: Preserve native regression evidence
+          go test -race -tags 'containers_image_openpgp exclude_graphdriver_btrfs exclude_graphdriver_devicemapper seccomp apparmor' .
+          go test -race -tags 'containers_image_openpgp exclude_graphdriver_btrfs exclude_graphdriver_devicemapper apparmor' .
+      - name: Native regressions and full CRI conformance
+        run: scripts/native-cri-conformance.sh target/debug/oci-cri "$RUNNER_TEMP/cri-native"
+      - name: Preserve native regression and conformance evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: coredns-native-regression
+          name: cri-native-regressions
           path: |
-            ${{ runner.temp }}/coredns-regression/results
-            ${{ runner.temp }}/coredns-regression/threaded-init
-            ${{ runner.temp }}/coredns-regression/runtime.log
-            ${{ runner.temp }}/coredns-regression/kernel.log
-      - name: CRI conformance (crictl smoke + critest)
-        run: |
-          set -euo pipefail
-          sudo mkdir -p /run/oci-cri /var/lib/oci-cri
-          sudo ./target/debug/oci-cri serve --socket /run/oci-cri/oci-cri.sock --root /var/lib/oci-cri &
-          for _ in $(seq 1 50); do [ -S /run/oci-cri/oci-cri.sock ] && break; sleep 0.2; done
-          sudo scripts/cri-conformance.sh /run/oci-cri/oci-cri.sock || true
+            ${{ runner.temp }}/cri-native/*.log
+            ${{ runner.temp }}/cri-native/*.xml
+            ${{ runner.temp }}/cri-native/*.json
+            ${{ runner.temp }}/cri-native/seccomp
+            ${{ runner.temp }}/cri-native/coredns
+            ${{ runner.temp }}/cri-native/threaded
 
   linux-rootless:
     name: rootless build and push

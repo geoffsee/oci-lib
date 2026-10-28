@@ -295,6 +295,8 @@ impl Engine for FakeEngine {
             status: guard.status.clone(),
             pid: guard.pid as i32,
             exit_code: guard.exit_code,
+            oom_killed: false,
+            namespaces: Default::default(),
         })
     }
 
