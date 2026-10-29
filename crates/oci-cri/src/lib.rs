@@ -26,6 +26,7 @@ pub mod convert;
 mod dns;
 pub mod engine;
 pub mod error;
+mod image_reference;
 mod image_service;
 pub mod logs;
 pub mod network;

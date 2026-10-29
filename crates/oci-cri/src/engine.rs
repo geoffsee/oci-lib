@@ -64,25 +64,18 @@ pub struct EngineImage {
 }
 
 impl EngineImage {
-    /// Match the stored identity or a name, treating an omitted tag as latest.
+    /// Match the stored identity or a name using Kubernetes image defaults.
     pub(crate) fn matches_reference(&self, requested: &str) -> bool {
-        let normalized = if !requested.contains('@')
-            && !requested
-                .rsplit('/')
-                .next()
-                .unwrap_or_default()
-                .contains(':')
-        {
-            format!("{requested}:latest")
-        } else {
-            requested.to_string()
-        };
-        self.id == requested
-            || self
-                .repo_tags
-                .iter()
-                .any(|name| name == requested || name == &normalized)
-            || self.repo_digests.iter().any(|name| name == requested)
+        if self.id == requested {
+            return true;
+        }
+        let normalized = crate::image_reference::normalize(requested).ok();
+        self.repo_tags.iter().chain(&self.repo_digests).any(|name| {
+            name == requested
+                || normalized.as_ref().is_some_and(|wanted| {
+                    crate::image_reference::normalize(name).as_ref().ok() == Some(wanted)
+                })
+        })
     }
 }
 
