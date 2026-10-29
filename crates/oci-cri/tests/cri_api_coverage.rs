@@ -15,6 +15,82 @@ use tonic::Code;
 use common::Harness;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn short_image_names_share_the_qualified_image_identity() {
+    let mut h = Harness::start().await;
+    let pulled = h
+        .images
+        .pull_image(PullImageRequest {
+            image: Some(ImageSpec {
+                image: "busybox:1.36".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("pull short name")
+        .into_inner();
+
+    for name in [
+        "busybox:1.36",
+        "library/busybox:1.36",
+        "docker.io/busybox:1.36",
+        "docker.io/library/busybox:1.36",
+    ] {
+        let spec = ImageSpec {
+            image: name.into(),
+            ..Default::default()
+        };
+        let image = h
+            .images
+            .image_status(ImageStatusRequest {
+                image: Some(spec.clone()),
+                ..Default::default()
+            })
+            .await
+            .expect("status")
+            .into_inner()
+            .image
+            .expect("image present");
+        assert_eq!(image.repo_tags, ["docker.io/library/busybox:1.36"]);
+        assert!(image.repo_digests.contains(&pulled.image_ref));
+        let listed = h
+            .images
+            .list_images(ListImagesRequest {
+                filter: Some(ImageFilter { image: Some(spec) }),
+            })
+            .await
+            .expect("filtered list")
+            .into_inner();
+        assert_eq!(listed.images.len(), 1, "{name}");
+    }
+
+    h.images
+        .remove_image(RemoveImageRequest {
+            image: Some(ImageSpec {
+                image: "busybox:1.36".into(),
+                ..Default::default()
+            }),
+        })
+        .await
+        .expect("remove short name");
+    assert!(
+        h.images
+            .image_status(ImageStatusRequest {
+                image: Some(ImageSpec {
+                    image: "docker.io/library/busybox:1.36".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("status after removal")
+            .into_inner()
+            .image
+            .is_none()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn status_version_and_runtime_config() {
     let mut h = Harness::start().await;
 
@@ -185,7 +261,7 @@ async fn image_service_pull_status_list_remove_and_fs_info() {
         filtered.images[0]
             .repo_tags
             .iter()
-            .any(|t| t == "fake/web:1")
+            .any(|t| t == "docker.io/fake/web:1")
     );
 
     let fs = h

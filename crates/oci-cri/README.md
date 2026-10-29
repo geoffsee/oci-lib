@@ -145,6 +145,15 @@ against a Mac-hosted socket is not supported yet.
 
 ## Container startup and DNS
 
+Image names use Kubernetes defaults: `busybox:1.36` resolves to
+`docker.io/library/busybox:1.36`, and an omitted tag means `latest`.
+Pull, status, list filters, container creation, and removal use the same
+normalization; digests take precedence over tags and local image IDs remain
+unchanged. Explicit registries are preserved. Short names do not use Podman's
+interactive aliases or search registries, so a node does not require
+`/etc/containers/registries.conf` to pull them. Registry mirror and TLS policy
+still apply to the resulting fully qualified reference.
+
 Args-only CRI requests retain the image entrypoint; an explicit command replaces
 it. Unprivileged workloads start with the containers-common default capabilities
 (CHOWN, DAC_OVERRIDE, FOWNER, FSETID, KILL, NET_BIND_SERVICE, SETFCAP, SETGID,

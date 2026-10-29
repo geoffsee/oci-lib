@@ -179,8 +179,9 @@ impl Inner {
         match self.find_image(requested) {
             Ok(image) => Ok(image),
             Err(_) => {
+                let image = crate::image_reference::normalize(requested)?;
                 self.engine
-                    .pull_image(requested, None, self.config.insecure_registries)?;
+                    .pull_image(&image, None, self.config.insecure_registries)?;
                 self.find_image(requested)
             }
         }

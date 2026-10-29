@@ -138,9 +138,10 @@ impl ImageService for CriService {
                 server_address: a.server_address,
                 identity_token: a.identity_token,
             });
+            let image = crate::image_reference::normalize(&spec.image)?;
             inner
                 .engine
-                .pull_image(&spec.image, auth.as_ref(), inner.config.insecure_registries)
+                .pull_image(&image, auth.as_ref(), inner.config.insecure_registries)
         })
         .await
         .map_err(|e| Status::internal(e.to_string()))??;
@@ -229,6 +230,33 @@ mod tests {
                 })
             })
         ));
+    }
+
+    #[test]
+    fn short_lookup_matches_tags_and_digests_only_in_the_default_registry() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let image = EngineImage {
+            id: "local-id".into(),
+            repo_tags: vec!["docker.io/library/busybox:1.36".into()],
+            repo_digests: vec![format!("docker.io/library/busybox@{digest}")],
+            ..Default::default()
+        };
+        for reference in [
+            "local-id".to_string(),
+            "busybox:1.36".to_string(),
+            format!("busybox@{digest}"),
+            format!("busybox:1.36@{digest}"),
+        ] {
+            assert!(image.matches_reference(&reference), "{reference}");
+        }
+        for reference in [
+            "busybox",
+            "busybox:other",
+            "registry.example/busybox:1.36",
+            "",
+        ] {
+            assert!(!image.matches_reference(reference), "{reference}");
+        }
     }
 
     #[test]
